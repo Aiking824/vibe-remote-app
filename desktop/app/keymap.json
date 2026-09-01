@@ -1,0 +1,200 @@
+{
+  "version": 3,
+  "keys": [
+    {
+      "id": "up",
+      "label": "上",
+      "display": "▲",
+      "group": "dpad",
+      "type": "key",
+      "mapping": "up"
+    },
+    {
+      "id": "down",
+      "label": "下",
+      "display": "▼",
+      "group": "dpad",
+      "type": "key",
+      "mapping": "down"
+    },
+    {
+      "id": "left",
+      "label": "左",
+      "display": "◀",
+      "group": "dpad",
+      "type": "key",
+      "mapping": "left"
+    },
+    {
+      "id": "right",
+      "label": "右",
+      "display": "▶",
+      "group": "dpad",
+      "type": "key",
+      "mapping": "right"
+    },
+    {
+      "id": "enter",
+      "label": "确认",
+      "display": "↵",
+      "group": "dpad",
+      "type": "key",
+      "mapping": "enter"
+    },
+    {
+      "id": "ctrl_enter",
+      "label": "终极确认",
+      "display": "Ctrl+↵",
+      "group": "fn",
+      "type": "combo",
+      "mapping": [
+        "ctrl",
+        "enter"
+      ]
+    },
+    {
+      "id": "shift_enter",
+      "label": "换行",
+      "display": "Shift+↵",
+      "group": "fn",
+      "type": "combo",
+      "mapping": [
+        "shift",
+        "enter"
+      ]
+    },
+    {
+      "id": "home",
+      "label": "桌面",
+      "display": "Win+D",
+      "group": "fn",
+      "type": "action",
+      "mapping": "home"
+    },
+    {
+      "id": "tv",
+      "label": "任务视图",
+      "display": "Win+Tab",
+      "group": "fn",
+      "type": "action",
+      "mapping": "tv"
+    },
+    {
+      "id": "shot",
+      "label": "区域截图",
+      "display": "Win+Shift+S",
+      "group": "fn",
+      "type": "combo",
+      "mapping": [
+        "win",
+        "shift",
+        "s"
+      ]
+    },
+    {
+      "id": "backspace",
+      "label": "退格",
+      "display": "⌫",
+      "group": "fn",
+      "type": "key",
+      "mapping": "backspace"
+    },
+    {
+      "id": "escape",
+      "label": "取消",
+      "display": "Esc",
+      "group": "fn",
+      "type": "key",
+      "mapping": "escape"
+    },
+    {
+      "id": "copy",
+      "label": "复制",
+      "display": "Ctrl+C",
+      "group": "clip",
+      "type": "action",
+      "mapping": "copy"
+    },
+    {
+      "id": "cut",
+      "label": "剪切",
+      "display": "Ctrl+X",
+      "group": "clip",
+      "type": "action",
+      "mapping": "cut"
+    },
+    {
+      "id": "paste",
+      "label": "粘贴",
+      "display": "Ctrl+V",
+      "group": "clip",
+      "type": "action",
+      "mapping": "paste"
+    },
+    {
+      "id": "win_d",
+      "label": "显示桌面",
+      "display": "Win+D",
+      "group": "hot",
+      "type": "combo",
+      "mapping": [
+        "win",
+        "d"
+      ]
+    },
+    {
+      "id": "alt_tab",
+      "label": "切换窗口",
+      "display": "Alt+Tab",
+      "group": "hot",
+      "type": "combo",
+      "mapping": [
+        "alt",
+        "tab"
+      ]
+    },
+    {
+      "id": "win_l",
+      "label": "锁屏",
+      "display": "Win+L",
+      "group": "hot",
+      "type": "combo",
+      "mapping": [
+        "win",
+        "l"
+      ]
+    },
+    {
+      "id": "n1",
+      "label": "1",
+      "display": "1",
+      "group": "num",
+      "type": "key",
+      "mapping": "1"
+    },
+    {
+      "id": "n2",
+      "label": "2",
+      "display": "2",
+      "group": "num",
+      "type": "key",
+      "mapping": "2"
+    },
+    {
+      "id": "n3",
+      "label": "3",
+      "display": "3",
+      "group": "num",
+      "type": "key",
+      "mapping": "3"
+    },
+    {
+      "id": "n4",
+      "label": "4",
+      "display": "4",
+      "group": "num",
+      "type": "key",
+      "mapping": "4"
+    }
+  ]
+}

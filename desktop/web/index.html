@@ -1,0 +1,492 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Vibe Remote · 控制台</title>
+<style>
+:root{
+  --bg:#14161a; --bg2:#0e1013; --panel:#1b1e24; --panel2:#21252c;
+  --border:#2a2f38; --fg:#e6e9ef; --sub:#8b93a3; --muted:#5b6472;
+  --brand:#4f7cff; --brand2:#7aa2ff; --accent:#3ddc97; --warn:#f0b429;
+  --err:#f47067; --radius:12px;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--bg);color:var(--fg);font-family:system-ui,-apple-system,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;display:flex;height:100vh;overflow:hidden}
+::-webkit-scrollbar{width:8px;height:8px}
+::-webkit-scrollbar-thumb{background:var(--border);border-radius:4px}
+
+/* ---- 侧边栏 ---- */
+#sidebar{width:216px;background:var(--bg2);border-right:1px solid var(--border);display:flex;flex-direction:column;flex-shrink:0}
+.logo{display:flex;align-items:center;gap:10px;padding:18px 16px 14px}
+.logo .mark{width:30px;height:30px;border-radius:9px;background:linear-gradient(135deg,var(--brand),#7c5cff);display:flex;align-items:center;justify-content:center;font-weight:800;font-size:15px;color:#fff;box-shadow:0 4px 14px rgba(79,124,255,.35)}
+.logo b{font-size:15px;letter-spacing:.3px}
+.logo span{display:block;font-size:10px;color:var(--muted);margin-top:1px}
+nav{padding:6px 10px;flex:1}
+.nav{display:flex;align-items:center;gap:10px;padding:9px 12px;border-radius:8px;cursor:pointer;color:var(--sub);font-size:13.5px;margin-bottom:2px;user-select:none;transition:background .15s,color .15s}
+.nav:hover{background:var(--panel);color:var(--fg)}
+.nav.on{background:var(--panel2);color:var(--fg);font-weight:600}
+.nav .ic{width:18px;text-align:center;font-size:14px}
+#sideFoot{padding:12px 16px;border-top:1px solid var(--border);font-size:11px;color:var(--muted)}
+#sideFoot .row{display:flex;align-items:center;gap:8px;margin-bottom:6px}
+.dot{width:8px;height:8px;border-radius:50%;flex-shrink:0}
+.dot.g{background:var(--accent);box-shadow:0 0 8px var(--accent)}
+.dot.r{background:var(--err)}
+.dot.y{background:var(--warn)}
+
+/* ---- 主区 ---- */
+#main{flex:1;overflow-y:auto;padding:20px 26px 40px}
+.topbar{display:flex;align-items:center;gap:6px;margin-bottom:18px}
+.topbar h1{font-size:19px;font-weight:700}
+.topbar .path{color:var(--muted);font-size:12.5px;margin-left:4px}
+.badge{font-size:11px;background:#2a2f3d;color:var(--sub);border:1px solid var(--border);padding:2px 9px;border-radius:20px;margin-left:8px}
+
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:14px}
+.card{background:var(--panel);border:1px solid var(--border);border-radius:var(--radius);padding:16px 18px}
+.card h3{font-size:13px;color:var(--sub);font-weight:600;margin-bottom:12px;display:flex;align-items:center;gap:8px}
+.card h3 .g{width:4px;height:14px;border-radius:2px;background:var(--brand)}
+.card .big{font-size:26px;font-weight:800}
+
+/* 配对卡 */
+.qrwrap{display:flex;flex-direction:column;align-items:center;gap:10px}
+.qrwrap img{width:176px;height:176px;border-radius:12px;background:#fff;padding:6px}
+.code{font-size:44px;font-weight:800;letter-spacing:10px;color:var(--brand2);font-variant-numeric:tabular-nums}
+.infoRow{display:flex;justify-content:space-between;font-size:12px;color:var(--sub);width:100%;padding:0 6px}
+.btn{margin-top:12px;width:100%;padding:10px;border:0;border-radius:9px;background:linear-gradient(135deg,var(--brand),#7c5cff);color:#fff;font-size:13.5px;cursor:pointer;transition:filter .15s}
+.btn:hover{filter:brightness(1.1)}
+.btn.ghost{background:transparent;border:1px solid var(--border);color:var(--sub)}
+.btn.sm{padding:5px 12px;width:auto;font-size:12px}
+
+/* 状态卡 */
+.stat-pill{display:inline-flex;align-items:center;gap:7px;font-size:12px;padding:4px 12px;border-radius:20px;border:1px solid var(--border);color:var(--sub);background:var(--panel2);margin-bottom:12px}
+.stat-pill .dot{width:7px;height:7px}
+.state-msg{font-size:15px;line-height:1.6;min-height:46px;color:var(--fg)}
+.meta{font-size:12px;color:var(--muted);margin-top:10px;display:flex;gap:14px;flex-wrap:wrap}
+
+/* 语音卡 */
+.voice-big{display:flex;align-items:center;gap:14px;margin-bottom:12px}
+.voice-big .word{font-size:30px;font-weight:800;color:var(--fg);font-family:"Segoe UI",sans-serif}
+.loglist{font-family:ui-monospace,Consolas,monospace;font-size:12px;color:var(--sub);max-height:220px;overflow-y:auto;line-height:1.9}
+.loglist .t{color:var(--muted);margin-right:8px}
+
+/* 按键映射 */
+.km-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:10px}
+.km-item{background:var(--panel2);border:1px solid var(--border);border-radius:10px;padding:10px 12px;display:flex;align-items:center;gap:10px}
+.km-item .disp{width:38px;height:38px;border-radius:9px;background:var(--panel);border:1px solid var(--border);display:flex;align-items:center;justify-content:center;font-size:16px;flex-shrink:0}
+.km-item .info{flex:1;min-width:0}
+.km-item .name{font-size:12.5px;font-weight:600}
+.km-item .lbl{font-size:10.5px;color:var(--muted)}
+.km-item input{width:100%;margin-top:5px;background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--fg);font-size:12px;padding:4px 8px;font-family:ui-monospace,Consolas,monospace}
+.km-item input:focus{outline:none;border-color:var(--brand)}
+.km-item .save{opacity:0;transition:opacity .2s}
+.km-item:hover .save{opacity:1}
+.tag{font-size:9.5px;padding:2px 7px;border-radius:10px;background:#2a3a5c;color:#9db9ff;border:1px solid #35486b}
+.tag.combo{background:#2d3a2e;color:#8fd0a4;border-color:#3a4b3c}
+.tag.key{background:#3a2d2d;color:#ffb0a6;border-color:#4b3a36}
+
+/* 日志页 */
+.logtable{font-size:12.5px}
+.logtable .rline{display:flex;gap:10px;padding:6px 0;border-bottom:1px solid var(--border);color:var(--sub)}
+.logtable .rline .time{color:var(--muted);flex-shrink:0;font-variant-numeric:tabular-nums}
+
+/* 开关 */
+.switch{position:relative;width:38px;height:21px;border-radius:20px;background:var(--border);cursor:pointer;transition:background .2s;flex-shrink:0}
+.switch.on{background:var(--brand)}
+.switch::after{content:"";position:absolute;top:2.5px;left:3px;width:16px;height:16px;border-radius:50%;background:#fff;transition:left .2s}
+.switch.on::after{left:19px}
+
+.placeholder{color:var(--muted);font-size:12.5px;padding:18px 0;text-align:center}
+
+/* 连接方式 4 按钮 + 设备列表 */
+.ways{display:grid;grid-template-columns:repeat(2,1fr);gap:10px;margin-bottom:6px}
+.way{border:1px solid var(--border);background:var(--panel2);border-radius:12px;padding:12px 14px;cursor:pointer;color:var(--fg);transition:all .15s;display:flex;align-items:center;gap:10px;text-align:left}
+.way:hover{background:#2a2f3a;border-color:#3a4150;transform:translateY(-1px)}
+.way.on{background:rgba(79,124,255,.14);border-color:var(--brand)}
+.way .ic{width:36px;height:36px;flex-shrink:0;border-radius:10px;background:var(--panel);display:flex;align-items:center;justify-content:center;font-size:18px;color:var(--sub)}
+.way.on .ic{background:var(--brand);color:#fff}
+.way .t{font-size:13px;font-weight:600;line-height:1.25}
+.way .s{font-size:11px;color:var(--muted);margin-top:2px;line-height:1.4}
+.waycol{display:flex;flex-direction:column;min-width:0;flex:1}
+
+.connhow{background:var(--panel2);border:1px solid var(--border);border-radius:12px;padding:12px 14px;margin-top:10px;color:var(--sub);font-size:12px;line-height:1.75}
+.connhow b{color:var(--fg)}
+.connhow .title{color:var(--brand);font-weight:700;font-size:12.5px;margin-bottom:6px;display:flex;align-items:center;gap:6px}
+
+.peerrow{display:flex;align-items:center;gap:10px;padding:9px 12px;border:1px solid var(--border);border-radius:10px;background:var(--panel2);margin-bottom:8px}
+.peerrow .dot{width:8px;height:8px;border-radius:50%;flex-shrink:0}
+.peerrow .dot.g{background:#3ddc97;box-shadow:0 0 8px #3ddc97}
+.peerrow .dot.r{background:var(--muted)}
+.peerrow .meta{flex:1;min-width:0;margin:0}
+.peerrow .n{font-size:13px;font-weight:600;color:var(--fg);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.peerrow .d{font-size:11px;color:var(--muted);margin-top:2px}
+.peerrow .act{display:flex;gap:6px}
+
+#peersList{margin-top:2px}
+</style>
+</head>
+<body>
+
+<aside id="sidebar">
+  <div class="logo">
+    <div class="mark">VR</div>
+    <div><b>Vibe Remote</b><span>手机遥控 · 电脑接收端</span></div>
+  </div>
+  <nav>
+    <div class="nav on" data-view="dash"><span class="ic">▦</span>控制台</div>
+    <div class="nav" data-view="keymap"><span class="ic">⌨</span>按键映射</div>
+    <div class="nav" data-view="logs"><span class="ic">≡</span>日志</div>
+    <div class="nav" data-view="about"><span class="ic">?</span>关于</div>
+  </nav>
+  <div id="sideFoot">
+    <div class="row"><span class="dot" id="wsDot"></span><span id="wsText">未连接</span></div>
+    <div class="row"><span style="color:var(--muted)">已配对设备</span><b id="sideClients" style="margin-left:auto">0</b></div>
+  </div>
+</aside>
+
+<main id="main">
+  <!-- 控制台 -->
+  <section id="view-dash">
+    <div class="topbar"><h1>控制台</h1><span class="path">/ 总览与配对</span><span class="badge" id="peerBadge">已连接 0 设备</span></div>
+    <div class="grid">
+      <div class="card">
+        <h3><span class="g"></span>扫码配对</h3>
+        <div class="qrwrap">
+          <img id="qrImg" alt="配对二维码">
+          <div class="code" id="pairCode">--</div>
+          <div class="infoRow"><span id="pairUrl">--</span><span id="pairExp" style="color:var(--muted)">--</span></div>
+        </div>
+        <button class="btn" onclick="refreshPair()">刷新配对</button>
+      </div>
+
+      <div class="card">
+        <h3><span class="g"></span>连接方式（手机端也有同样 4 个按钮可选）</h3>
+        <div class="ways" id="connWays"></div>
+        <div class="connhow" id="connHow"></div>
+      </div>
+
+      <div class="card">
+        <h3><span class="g"></span>已连接设备（查看 + 重新配对）</h3>
+        <div id="peersList"><div class="placeholder">等待设备连接…</div></div>
+        <button class="btn ghost" onclick="refreshPair()">生成新配对码 / 新设备加入</button>
+      </div>
+
+      <div class="card">
+        <h3><span class="g"></span>Agent 状态</h3>
+        <div class="stat-pill"><span class="dot" id="stDot"></span><span id="stState">READY</span><span id="stSource" style="color:var(--muted)"></span></div>
+        <div class="state-msg" id="stMsg">等待状态…</div>
+        <div class="meta"><span>项目：<b id="stProj">--</b></span><span>来源：<b id="stSrc2">--</b></span></div>
+      </div>
+
+      <div class="card">
+        <h3><span class="g"></span>按住说话（手机→电脑语音输入法）</h3>
+        <div class="voice-big" style="margin-top:6px">
+          <span class="word" id="lastCmd">—</span>
+          <span style="font-size:11px;color:var(--muted)" id="lastCmdAt"></span>
+        </div>
+        <p style="font-size:12.5px;color:var(--sub);line-height:1.8">
+          本电脑端不做中文方向词识别。音频会直接进入系统默认录音设备
+          （推荐安装 VB-CABLE 将手机音频路由到微信输入法、剪映字幕、系统语音转写等工具）。
+          每次按住时触发一次 <code>Ctrl+Shift+Win</code>（切换输入法语音输入），
+          松开时再触发一次，结束识别。
+        </p>
+        <div class="loglist" id="voiceLogs"><div class="placeholder">识别日志将显示在这里</div></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 按键映射 -->
+  <section id="view-keymap" style="display:none">
+    <div class="topbar"><h1>按键映射</h1><span class="path">/ 手机按键 ↔ 电脑快捷键</span>
+      <span class="nav btn sm ghost" style="margin-left:auto;padding:5px 12px" onclick="resetKeymap()">恢复默认</span>
+    </div>
+    <p style="font-size:12.5px;color:var(--muted);margin-bottom:14px">
+      每个键位可修改为任意按键：单键（up/down/left/right/enter/escape/1-9/a-z/f1-f12）或组合键，如
+      <code style="color:var(--brand2)">ctrl,c</code>、<code style="color:var(--brand2)">win,shift,s</code>。保存后自动同步到手机。
+    </p>
+    <div class="km-grid" id="kmGrid"></div>
+  </section>
+
+  <!-- 日志 -->
+  <section id="view-logs" style="display:none">
+    <div class="topbar"><h1>运行日志</h1><span class="path">/ 最近记录</span></div>
+    <div class="card"><div class="logtable" id="logTable"><div class="placeholder">暂无日志</div></div></div>
+  </section>
+
+  <!-- 关于 -->
+  <section id="view-about" style="display:none">
+    <div class="topbar"><h1>关于</h1><span class="path">/ Vibe Remote</span></div>
+    <div class="card" style="max-width:520px;font-size:13px;line-height:1.9;color:var(--sub)">
+      <b style="color:var(--fg)">Vibe Remote</b> 让手机成为电脑的遥控器与语音输入设备。<br>
+      手机 App / 网页 通过局域网 WebSocket 连接本服务：<br>
+      ▸ 方向键 / 数字键 / 自定义快捷键 注入电脑<br>
+      ▸ 按住说话 · 音频流经虚拟声卡进入语音工具（微信输入法 / 剪贴板语音）<br>
+      ▸ 实时显示 Claude / Codex / Trae / DeepSeek 的 Agent 状态<br>
+      <div style="margin-top:10px;color:var(--muted)">详见项目 README。</div>
+    </div>
+  </section>
+</main>
+
+<script>
+const $ = id => document.getElementById(id);
+let ws = null, paired = false, panelToken = null, keymap = [], logs = [];
+let lastPairData = null;
+const stateColor = {READY:'#3ddc97', WORKING:'#f0b429', THINKING:'#4f7cff', ERROR:'#f47067', IDLE:'#8b93a3'};
+const bootTime = Date.now();
+
+/* ---------- 连接方式（4 按钮，顺序与手机端一致） ---------- */
+const CONN_WAYS = [
+  {
+    id: 'wifi',
+    title: '1. 连接到同一网络',
+    sub: '通用推荐：手机与电脑同 WiFi',
+    icon: '📶',
+    how: [
+      '1. 把电脑和手机都接入 <b>同一个 Wi-Fi</b>（5GHz 延迟更低）。',
+      '2. 本页的「扫码配对」卡片里扫码，或直接复制 pairing_url 到手机 App。',
+      '3. 若电脑/路由器防火墙拦截，需放行本端口（默认 8765）。',
+    ],
+  },
+  {
+    id: 'usb',
+    title: '2. USB 直连电脑',
+    sub: '延迟最低：USB 调试 + adb reverse',
+    icon: '🔌',
+    how: [
+      '1. 服务启动时已自动执行 <b>adb reverse tcp:8765 tcp:8765</b>（见上方 adb 状态）。',
+      '2. 手机：「开发者选项 → USB 调试」打开，用数据线接电脑并允许调试。',
+      '3. 手机 App 点「USB 直连电脑」会填好 127.0.0.1:8765，点连接即可（不占 Wi-Fi）。',
+    ],
+  },
+  {
+    id: 'hotspot',
+    title: '3. 电脑开热点',
+    sub: '延迟比一般路由器 WiFi 更低',
+    icon: '🛰',
+    how: [
+      '1. 电脑：设置 → 网络和 Internet → 移动热点 → 打开。',
+      '2. 手机 WiFi 列表连接该热点 SSID。',
+      '3. 下方「本机 IP」会显示热点新网卡 IP，App 填 http://该IP:8765/。',
+    ],
+  },
+  {
+    id: 'share',
+    title: '4. 手机对电脑 USB 共享网络',
+    sub: '没有 WiFi 也能走有线',
+    icon: '🪢',
+    how: [
+      '1. 手机：设置 → 移动网络 → USB 网络共享 → 开启。',
+      '2. 电脑会出现“远程 NDIS / 以太网 2”新网卡。',
+      '3. 打开 cmd 执行 ipconfig，找到该网卡 IPv4 地址，App 填 http://该IP:8765/。',
+    ],
+  },
+];
+let curWay = 'wifi';
+function renderWays(){
+  const box = $('connWays');
+  box.innerHTML = '';
+  CONN_WAYS.forEach(w => {
+    const el = document.createElement('div');
+    el.className = 'way' + (curWay === w.id ? ' on' : '');
+    el.innerHTML = `<div class="ic">${w.icon}</div>
+      <div class="waycol"><div class="t">${w.title}</div><div class="s">${w.sub}</div></div>`;
+    el.onclick = () => { curWay = w.id; renderWays(); renderConnHow(); };
+    box.appendChild(el);
+  });
+  renderConnHow();
+}
+function renderConnHow(){
+  const w = CONN_WAYS.find(x => x.id === curWay);
+  const adb = (lastPairData && lastPairData.adb) || {};
+  const adbTip = curWay === 'usb'
+    ? `<div style="margin-top:6px"><b>ADB 直连状态：</b>${(adb.ok ? '✅ 已就绪：' : '⚠ ') + (adb.message || '')}</div>`
+    : '';
+  const ipList = (lastPairData && Array.isArray(lastPairData.ips))
+    ? `<div style="margin-top:6px"><b>本机 IP（可填到手机 App）：</b>${lastPairData.ips.map(i => '<code style="color:var(--brand2)">'+i+'</code>').join(' · ')}</div>`
+    : '';
+  $('connHow').innerHTML = `<div class="title">使用方式：${w.title}</div>${w.how.map(x => `<div>${x}</div>`).join('')}${adbTip}${ipList}`;
+}
+
+/* ---------- 设备列表 ---------- */
+let peersCache = [];
+function renderPeers(peers){
+  if (Array.isArray(peers)) peersCache = peers;
+  const list = peersCache;
+  const box = $('peersList');
+  if (!list || list.length === 0) { box.innerHTML = '<div class="placeholder">暂无历史会话</div>'; return; }
+  box.innerHTML = '';
+  list.forEach(p => {
+    const row = document.createElement('div');
+    row.className = 'peerrow';
+    const seen = p.seen_at ? new Date(p.seen_at*1000).toLocaleString('zh-CN',{hour12:false}) : '--';
+    row.innerHTML = `<span class="dot ${p.online ? 'g':'r'}"></span>
+      <div class="meta">
+        <div class="n">${esc(p.name||('设备 '+(p.id||'?')))}</div>
+        <div class="d">ID: ${esc(p.id||'?')} · IP: ${esc(p.ip||'--')} · 上次: ${seen}</div>
+      </div>
+      <div class="act">
+        ${p.online
+          ? '<button class="btn sm ghost" disabled>已连接</button>'
+          : `<button class="btn sm" data-id="${esc(p.id||'')}">重新配对</button>`}
+      </div>`;
+    box.appendChild(row);
+    const btn = row.querySelector('button[data-id]');
+    if (btn) btn.onclick = () => { refreshPair(); toast('已生成新的配对码，让该手机扫码或使用上次的 pairing_url 即可重新连接'); };
+  });
+}
+
+/* ---------- Toast ---------- */
+let toastTid;
+function toast(text){
+  let t = document.getElementById('__toast');
+  if (!t) {
+    t = document.createElement('div');
+    t.id = '__toast';
+    t.style.cssText = 'position:fixed;left:50%;bottom:30px;transform:translateX(-50%);background:rgba(30,34,42,.94);color:#fff;padding:9px 16px;border-radius:10px;font-size:12.5px;z-index:9999;border:1px solid #2a2f38;opacity:0;transition:opacity .2s;max-width:80vw';
+    document.body.appendChild(t);
+  }
+  t.textContent = text;
+  t.style.opacity = '1';
+  clearTimeout(toastTid);
+  toastTid = setTimeout(() => { t.style.opacity = '0'; }, 2200);
+}
+
+/* ---------- 视图切换 ---------- */
+document.querySelectorAll('.nav').forEach(n => n.addEventListener('click', () => {
+  document.querySelectorAll('.nav').forEach(x => x.classList.remove('on'));
+  n.classList.add('on');
+  document.querySelectorAll('#main section').forEach(s => s.style.display = 'none');
+  $('view-' + n.dataset.view).style.display = '';
+  if (n.dataset.view === 'keymap') renderKeymap();
+  if (n.dataset.view === 'logs') renderLogs();
+}));
+
+/* ---------- 配对信息 ---------- */
+async function loadPair() {
+  try {
+    const r = await fetch('/pair/info');
+    const d = await r.json();
+    lastPairData = d;
+    if (d.panel_token) panelToken = d.panel_token;
+    $('pairCode').textContent = d.code;
+    $('pairUrl').textContent = d.pairing_url.replace('http://','');
+    $('pairExp').textContent = Math.floor(d.expires_in/60)+'分'+(d.expires_in%60)+'秒';
+    $('qrImg').src = '/pair/qr.png?t='+Date.now();
+    $('sideClients').textContent = d.clients;
+    $('peerBadge').textContent = '已连接 '+d.clients+' 设备';
+    if (d.clients > 0) $('peerBadge').style.color = 'var(--accent)'; else $('peerBadge').style.color = '';
+    renderConnHow();
+    if (Array.isArray(d.peers)) renderPeers(d.peers);
+  } catch(e) {}
+  setTimeout(loadPair, 3000);
+}
+async function refreshPair(){ await fetch('/pair/new'); loadPair(); }
+
+/* ---------- WebSocket ---------- */
+function connect() {
+  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+  ws = new WebSocket(`${proto}://${location.host}/ws`);
+  ws.onopen = () => {
+    $('wsDot').className = 'dot g'; $('wsText').textContent = '已连接控制台';
+    if (panelToken) ws.send(JSON.stringify({type:'hello', token: panelToken}));
+  };
+  ws.onmessage = ev => {
+    let m; try { m = JSON.parse(ev.data); } catch(e){ return; }
+    if (m.type === 'paired') { paired = true; syncState(); return; }
+    if (m.type === 'keymap') { keymap = m.keys; if ($('view-keymap').style.display !== 'none') renderKeymap(); return; }
+    if (m.type === 'logs') { logs = m.logs; return; }
+    if (m.type === 'status') renderStatus(m);
+    if (m.type === 'session') renderSession(m);
+    if (m.type === 'voice') {
+      $('lastCmd').textContent = m.word || m.label || '—';
+      $('lastCmdAt').textContent = new Date().toLocaleTimeString('zh-CN',{hour12:false});
+      pushLogFile('🎤 '+m.label);
+    }
+    if (m.type === 'log') pushLogFile(m.text);
+    if (m.type === 'peer_info') {
+      $('sideClients').textContent = m.clients;
+      $('peerBadge').textContent = '已连接 '+m.clients+' 设备';
+      if (Array.isArray(m.peers)) renderPeers(m.peers);
+    }
+    if (m.type === 'error' && m.code === 'replaced') alert('被其他设备接管');
+  };
+  ws.onclose = () => { $('wsDot').className = 'dot r'; $('wsText').textContent = '连接断开，重连中…'; setTimeout(connect, 1500); };
+  ws.onerror = () => ws.close();
+}
+function send(obj){ if (ws && ws.readyState === 1) ws.send(JSON.stringify(obj)); }
+
+/* ---------- 状态渲染 ---------- */
+function renderStatus(m) {
+  const st = (m.state || 'READY').toUpperCase();
+  $('stState').textContent = st;
+  $('stMsg').textContent = m.message || '';
+  $('stProj').textContent = m.project || '--';
+  $('stSrc2').textContent = m.source || '--';
+  $('stSource').textContent = m.source ? ' · '+m.source : '';
+  $('stDot').style.background = stateColor[st] || '#8b93a3';
+  $('stDot').style.boxShadow = `0 0 8px ${stateColor[st] || '#8b93a3'}`;
+  $('stState').style.color = stateColor[st] || '#8b93a3';
+}
+function renderSession(m) {
+  const ph = m.phase;
+  const el = $('voiceLogs');
+  if (ph === 'capturing') pushLogFile('🎙 正在录音…（'+(m.device||'')+'）');
+  else if (ph === 'starting') pushLogFile('→ 启动语音输入…');
+  else if (ph === 'idle') pushLogFile('✓ 录音结束');
+  else if (ph === 'error') pushLogFile('⚠ '+m.message);
+}
+function pushLogFile(txt){
+  const t = new Date().toLocaleTimeString('zh-CN',{hour12:false});
+  logs.unshift({t: Date.now(), text: txt});
+  if (logs.length > 100) logs.pop();
+  const box = $('voiceLogs');
+  box.innerHTML = '';
+  logs.slice(0,6).forEach(l => { const d = document.createElement('div'); d.className='loglist'; d.innerHTML = '<span class="t">'+timeStr(l.t)+'</span>'+esc(l.text); box.appendChild(d); });
+}
+function timeStr(ms){ const d=new Date(ms); return String(d.getHours()).padStart(2,'0')+':'+String(d.getMinutes()).padStart(2,'0')+':'+String(d.getSeconds()).padStart(2,'0'); }
+function esc(s){ return s.replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+function syncState(){ send({type:'get_keymap'}); send({type:'get_logs'}); }
+
+/* ---------- 按键映射编辑 ---------- */
+function renderKeymap() {
+  const el = $('kmGrid'); el.innerHTML = '';
+  if (!keymap.length) { el.innerHTML = '<div class="placeholder">加载中…</div>'; return; }
+  keymap.forEach(k => {
+    const div = document.createElement('div'); div.className = 'km-item';
+    const tagCls = k.type === 'combo' ? 'combo' : 'key';
+    div.innerHTML = `
+      <div class="disp">${esc(k.display||k.label)}</div>
+      <div class="info">
+        <div><span class="name">${esc(k.label)}</span> <span class="tag ${tagCls}">${k.type}</span></div>
+        <div class="lbl">${esc(k.id)}</div>
+        <input data-id="${esc(k.id)}" value="${esc(fmtMap(k.mapping))}" placeholder="up / ctrl,c">
+      </div>
+      <button class="btn sm ghost save" data-id="${esc(k.id)}">保存</button>`;
+    div.querySelector('.save').onclick = () => {
+      const inp = div.querySelector('input');
+      const raw = inp.value.trim();
+      send({type:'set_keymap', key_id: k.id, mapping: raw.includes(',') ? raw.split(/\s*,\s*/) : raw});
+      inp.style.borderColor = 'var(--accent)';
+      setTimeout(()=>{ inp.style.borderColor=''; }, 800);
+    };
+    div.querySelector('input').addEventListener('keydown', e => { if (e.key === 'Enter') div.querySelector('.save').click(); });
+    el.appendChild(div);
+  });
+}
+function fmtMap(m){ return Array.isArray(m) ? m.join(',') : m; }
+function resetKeymap(){ if (confirm('恢复默认按键布局？')) send({type:'keymap_reset'}); }
+
+/* ---------- 日志页 ---------- */
+function renderLogs() {
+  const el = $('logTable'); el.innerHTML = '';
+  if (!logs.length) { el.innerHTML = '<div class="placeholder">暂无日志</div>'; return; }
+  logs.forEach(l => {
+    const d = document.createElement('div'); d.className = 'rline';
+    d.innerHTML = `<span class="time">${timeStr(l.t)}</span><span>${esc(l.text)}</span>`;
+    el.appendChild(d);
+  });
+}
+
+loadPair(); renderWays(); connect();
+</script>
+</body>
+</html>

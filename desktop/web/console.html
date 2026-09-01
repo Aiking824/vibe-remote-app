@@ -1,0 +1,53 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Vibe Remote · 配对控制台</title><style>
+:root{color-scheme:light dark;--bg:#f5f6f8;--fg:#23272f;--card:#fff;--sub:#6b7280;--brand:#4f7cff}
+@media(prefers-color-scheme:dark){:root{--bg:#14161a;--fg:#e8eaed;--card:#1e2228;--sub:#9aa3af}}
+body{margin:0;font-family:system-ui,-apple-system,"Segoe UI",sans-serif;background:var(--bg);color:var(--fg);
+display:flex;min-height:100vh;align-items:center;justify-content:center}
+.card{background:var(--card);border-radius:16px;padding:28px 32px;max-width:420px;width:min(92vw,420px);
+box-shadow:0 8px 30px rgba(0,0,0,.08)}
+h1{font-size:20px;margin:0 0 4px}.sub{color:var(--sub);margin:0 0 18px;font-size:14px}
+.code{font-size:56px;font-weight:800;letter-spacing:8px;text-align:center;margin:8px 0 18px;color:var(--brand)}
+img#qr{display:block;margin:0 auto;width:200px;height:200px;border-radius:12px}
+.status{display:flex;justify-content:space-between;margin-top:16px;font-size:13px;color:var(--sub)}
+button{margin-top:18px;width:100%;padding:12px;border:0;border-radius:10px;background:var(--brand);
+color:#fff;font-size:15px;cursor:pointer}
+.ways{margin-top:16px;padding:12px 14px;border-radius:10px;background:var(--bg);font-size:12.5px;
+color:var(--sub);line-height:1.7}
+.ways b{color:var(--fg)}.ways .ok{color:#22a06b}.ways .bad{color:#e5484d}
+.ips{margin-top:4px;font-family:ui-monospace,Consolas,monospace}
+</style></head><body>
+<div class="card"><h1>Vibe Remote 配对</h1><p class="sub">手机扫码打开 App / 网页，核对确认码后点确认</p>
+<div style="text-align:center"><img id="qr" alt="二维码"></div>
+<div class="code" id="code">--</div>
+<div class="status"><span>已连接 <b id="clients">0</b>/<span id="maxc">2</span></span>
+<span id="expiry">--</span></div>
+<div class="ways"><b>三种连接方式</b><br>
+1. USB 直连：<span id="adb"></span><br>
+2. WiFi / 电脑热点 / USB 网络共享：App 地址填下列任一 IP<br>
+<span class="ips" id="ips">--</span></div>
+<button onclick="refresh()">刷新配对</button>
+</div>
+<script>
+async function info(){try{const r=await fetch('/pair/info');return await r.json()}catch(e){return null}}
+async function tick(){
+ const d=await info();
+ if(!d){setTimeout(tick,2000);return}
+ document.getElementById('code').textContent=d.code;
+ document.getElementById('clients').textContent=d.clients;
+ document.getElementById('maxc').textContent=d.max_clients;
+ document.getElementById('qr').src='/pair/qr.png?t='+Date.now();
+ const m=Math.max(0,Math.round(d.expires_in));const mm=Math.floor(m/60),ss=m%60;
+ document.getElementById('expiry').textContent='二维码有效期 '+mm+'分'+String(ss).padStart(2,'0')+'秒';
+ const adbEl=document.getElementById('adb');
+ if(d.adb&&!d.adb.pending){adbEl.textContent=d.adb.message;
+  adbEl.className=d.adb.ok?'ok':'bad'}else{adbEl.textContent='检测中…';adbEl.className=''}
+ const ips=(d.ips||[]).map(function(ip){return '127.0.0.1'===ip?'':(ip+':'+location.port)})
+  .filter(Boolean).join('、');
+ document.getElementById('ips').textContent=ips||'--';
+ setTimeout(tick,2000)
+}
+async function refresh(){await fetch('/pair/new');tick()}
+tick()
+</script></body></html>

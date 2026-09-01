@@ -1,0 +1,28 @@
+# ---- build & cache ----
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.eggs/
+build/
+dist/
+*.log
+
+# ---- IDE / OS ----
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# ---- android studio / gradle ----
+android/.gradle/
+android/.idea/
+android/local.properties
+android/build/
+android/**/build/
+android/captures/
+*.apk
+*.aab
+
+# ---- local-only state produced by run ----
+vibe-remote.log

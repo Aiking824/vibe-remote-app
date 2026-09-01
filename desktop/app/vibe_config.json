@@ -1,0 +1,20 @@
+{
+  "port": 8765,
+  "host": "0.0.0.0",
+  "max_clients": 2,
+  "long_press_ms": 500,
+  "token_ttl_sec": 600,
+  "status_file": "~/.vico/status.json",
+  "status_poll_interval_s": 0.3,
+  "audio_device": "CABLE Input",
+  "sample_rate": 0,
+  "voice_cmd": false,
+  "voice_source": "cable",
+  "provider": {
+    "shortcut": ["ctrl", "shift", "win"],
+    "mode": "toggle",
+    "start_delay_ms": 80,
+    "drain_ms": 200,
+    "tap_down_ms": 50
+  }
+}
