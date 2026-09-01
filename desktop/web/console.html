@@ -1,53 +1,249 @@
 <!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Vibe Remote · 配对控制台</title><style>
-:root{color-scheme:light dark;--bg:#f5f6f8;--fg:#23272f;--card:#fff;--sub:#6b7280;--brand:#4f7cff}
-@media(prefers-color-scheme:dark){:root{--bg:#14161a;--fg:#e8eaed;--card:#1e2228;--sub:#9aa3af}}
-body{margin:0;font-family:system-ui,-apple-system,"Segoe UI",sans-serif;background:var(--bg);color:var(--fg);
-display:flex;min-height:100vh;align-items:center;justify-content:center}
-.card{background:var(--card);border-radius:16px;padding:28px 32px;max-width:420px;width:min(92vw,420px);
-box-shadow:0 8px 30px rgba(0,0,0,.08)}
-h1{font-size:20px;margin:0 0 4px}.sub{color:var(--sub);margin:0 0 18px;font-size:14px}
-.code{font-size:56px;font-weight:800;letter-spacing:8px;text-align:center;margin:8px 0 18px;color:var(--brand)}
-img#qr{display:block;margin:0 auto;width:200px;height:200px;border-radius:12px}
-.status{display:flex;justify-content:space-between;margin-top:16px;font-size:13px;color:var(--sub)}
-button{margin-top:18px;width:100%;padding:12px;border:0;border-radius:10px;background:var(--brand);
-color:#fff;font-size:15px;cursor:pointer}
-.ways{margin-top:16px;padding:12px 14px;border-radius:10px;background:var(--bg);font-size:12.5px;
-color:var(--sub);line-height:1.7}
-.ways b{color:var(--fg)}.ways .ok{color:#22a06b}.ways .bad{color:#e5484d}
-.ips{margin-top:4px;font-family:ui-monospace,Consolas,monospace}
-</style></head><body>
-<div class="card"><h1>Vibe Remote 配对</h1><p class="sub">手机扫码打开 App / 网页，核对确认码后点确认</p>
-<div style="text-align:center"><img id="qr" alt="二维码"></div>
-<div class="code" id="code">--</div>
-<div class="status"><span>已连接 <b id="clients">0</b>/<span id="maxc">2</span></span>
-<span id="expiry">--</span></div>
-<div class="ways"><b>三种连接方式</b><br>
-1. USB 直连：<span id="adb"></span><br>
-2. WiFi / 电脑热点 / USB 网络共享：App 地址填下列任一 IP<br>
-<span class="ips" id="ips">--</span></div>
-<button onclick="refresh()">刷新配对</button>
+<title>VIBE · REMOTE · PAIR</title>
+<style>
+/* ======== AgentPager 像素风调色板（与 Android 端 AgColors 完全一致） ======== */
+:root{
+  --Bg:#05070B;
+  --Surface:#0B1018;
+  --SurfaceRaised:#101824;
+  --Divider:#18212E;
+  --Text:#E8EDF5;
+  --Muted:#7F8A9A;
+  --Dimmed:#4F5968;
+  --Blue:#60A5FA;
+  --Cyan:#5EEAD4;
+  --Violet:#A78BFA;
+  --Amber:#FDBA4A;
+  --Green:#4ADE80;
+  --Red:#FB7185;
+  --mono:'Press Start 2P','VT323',ui-monospace,Consolas,'Courier New',monospace;
+}
+*{box-sizing:border-box;margin:0;padding:0;border:0;outline:0;border-radius:0 !important}
+html,body{height:100%}
+body{
+  background:var(--Bg);color:var(--Text);
+  font-family:system-ui,-apple-system,'Segoe UI',sans-serif;
+  display:flex;align-items:center;justify-content:center;
+  min-height:100vh;padding:24px 16px;
+  image-rendering:pixelated;
+}
+/* 像素点阵网格背景（AgentPager 桌面截图风格） */
+body::before{
+  content:"";position:fixed;inset:0;pointer-events:none;z-index:0;
+  background-image:
+    linear-gradient(rgba(253,186,74,0.035) 1px,transparent 1px),
+    linear-gradient(90deg,rgba(253,186,74,0.035) 1px,transparent 1px);
+  background-size:32px 32px;
+}
+.frame{position:relative;z-index:1;width:min(520px,100%)}
+
+/* 外像素描边（双层 = 像素感） */
+.pixel-border{
+  background:var(--Surface);
+  border:1px solid var(--Divider);
+  box-shadow:
+    0 0 0 2px var(--Bg),
+    0 0 0 3px var(--Amber),
+    0 16px 48px rgba(0,0,0,.45);
+  padding:18px;
+}
+
+/* Header */
+.brand{display:flex;align-items:center;gap:10px;margin-bottom:14px}
+.brand .logo{
+  width:28px;height:28px;background:var(--Amber);display:flex;align-items:center;justify-content:center;
+  color:var(--Bg);font-weight:900;font-size:14px;letter-spacing:0;font-family:var(--mono);
+}
+.brand .title{
+  color:var(--Amber);font-family:var(--mono);font-size:15px;letter-spacing:2.5px;font-weight:900;
+}
+.brand .dot{margin-left:auto;display:flex;align-items:center;gap:6px;color:var(--Muted);font-size:11px;font-family:var(--mono);letter-spacing:1px}
+.brand .dot i{display:inline-block;width:9px;height:9px;background:var(--Amber)}
+
+/* 分隔像素条 */
+.thin-bar{height:2px;background:var(--Divider);position:relative;margin:10px 0}
+.thin-bar::after{content:"";position:absolute;left:0;top:0;bottom:0;width:36%;background:var(--Amber)}
+
+/* 中间：QR + URL + 确认码 */
+.qr-wrap{
+  margin:18px 0 8px;display:flex;flex-direction:column;align-items:center;gap:10px;
+  padding:14px;background:var(--SurfaceRaised);border:1px solid var(--Divider);
+}
+.qr-wrap img{
+  width:220px;height:220px;display:block;border:1px solid var(--Divider);
+  background:#fff;image-rendering:pixelated;
+}
+.url-box{
+  width:100%;background:var(--Bg);border:1px solid var(--Divider);padding:10px 12px;
+  font-family:var(--mono);color:var(--Cyan);font-size:11.5px;letter-spacing:.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+  cursor:copy;user-select:all;
+}
+.code-box{
+  display:flex;align-items:center;justify-content:space-between;gap:10px;margin-top:2px;
+}
+.code-label{color:var(--Muted);font-family:var(--mono);font-size:10px;letter-spacing:2px}
+.code-num{
+  color:var(--Amber);font-family:var(--mono);font-size:44px;letter-spacing:12px;font-weight:900;
+  padding:6px 14px;background:var(--Bg);border:1px solid var(--Divider);
+  text-shadow:0 0 16px rgba(253,186,74,.25);
+}
+
+/* 状态行 */
+.status-row{
+  display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px;margin-top:14px;
+  font-family:var(--mono);font-size:10.5px;letter-spacing:1px;
+}
+.pill{
+  display:inline-flex;align-items:center;gap:6px;padding:6px 9px;background:var(--SurfaceRaised);border:1px solid var(--Divider);
+}
+.pill i{width:7px;height:7px;background:var(--Green);display:inline-block}
+.pill.bad i{background:var(--Red)}
+.pill.wait i{background:var(--Amber)}
+
+/* 连接方式 */
+.how-card{
+  margin-top:16px;background:var(--SurfaceRaised);border:1px solid var(--Divider);padding:12px 14px;
+  display:flex;flex-direction:column;gap:8px;
+}
+.how-card h2{
+  font-family:var(--mono);color:var(--Text);font-size:11px;letter-spacing:2px;font-weight:900;
+  display:flex;align-items:center;gap:8px;
+}
+.how-card h2 i{width:12px;height:12px;background:var(--Amber)}
+.how-item{
+  font-size:12.5px;color:var(--Text);line-height:1.7;display:flex;gap:8px;align-items:flex-start;
+}
+.how-item .n{
+  flex-shrink:0;width:28px;height:28px;background:rgba(253,186,74,.16);border:1px solid var(--Amber);
+  color:var(--Amber);font-family:var(--mono);font-size:11px;display:flex;align-items:center;justify-content:center;font-weight:900;
+}
+.how-item b{color:var(--Text);font-weight:700}
+.how-item .ok{color:var(--Green)}
+.how-item .bad{color:var(--Red)}
+.ip-list{
+  margin-top:2px;font-family:var(--mono);font-size:10.5px;color:var(--Cyan);background:var(--Bg);
+  padding:8px 10px;border:1px solid var(--Divider);word-break:break-all;line-height:1.8;
+}
+
+/* 底部像素按钮行 */
+.btn-row{display:flex;gap:8px;margin-top:16px}
+.btn{
+  flex:1;height:44px;font-family:var(--mono);font-size:11px;letter-spacing:1.5px;font-weight:900;
+  cursor:pointer;color:var(--Bg);background:var(--Amber);border:1px solid var(--Amber);
+  display:flex;align-items:center;justify-content:center;gap:8px;
+  transition:transform .04s ease;
+}
+.btn:hover{transform:translateY(-1px)}
+.btn:active{transform:translateY(1px)}
+.btn.ghost{background:transparent;color:var(--Muted);border:1px solid var(--Divider)}
+.btn.ghost:hover{color:var(--Text);border-color:var(--Amber)}
+
+/* 底部签名 */
+.foot{margin-top:18px;text-align:center;color:var(--Dimmed);font-family:var(--mono);font-size:9.5px;letter-spacing:2px}
+.copy-tip{color:var(--Muted);font-family:var(--mono);font-size:9px;letter-spacing:1px;text-align:center;margin-top:4px}
+</style>
+</head><body>
+<div class="frame">
+  <div class="pixel-border">
+
+    <div class="brand">
+      <div class="logo">V</div>
+      <div class="title">VIBE · REMOTE</div>
+      <div class="dot"><i></i><span id="wsText">READY</span></div>
+    </div>
+
+    <div class="thin-bar"></div>
+
+    <div class="qr-wrap">
+      <img id="qr" alt="QR">
+      <div class="url-box" id="url" title="点击复制">http://--:--/?pair=--</div>
+      <div class="copy-tip">▲ 点击 URL 可复制到剪贴板</div>
+      <div class="code-box">
+        <span class="code-label">CONFIRM&nbsp;CODE</span>
+        <span class="code-num" id="code">----</span>
+      </div>
+    </div>
+
+    <div class="status-row">
+      <span class="pill" id="clientsPill"><i id="clientsDot"></i>CLIENTS&nbsp;<b id="clients">0</b>/<span id="maxc">2</span></span>
+      <span class="pill wait"><i></i><span id="expiry">--</span></span>
+    </div>
+
+    <div class="how-card">
+      <h2><i></i>CONNECT&nbsp;METHODS</h2>
+      <div class="how-item">
+        <div class="n">01</div>
+        <div><b>USB 直连</b>（推荐，零延迟）：<span id="adb" class="">检测中…</span></div>
+      </div>
+      <div class="how-item">
+        <div class="n">02</div>
+        <div><b>同 WiFi / USB 网络共享</b>：App 中填入任一 LAN IP + port<br>
+          <div class="ip-list" id="ips">--</div>
+        </div>
+      </div>
+      <div class="how-item">
+        <div class="n">03</div>
+        <div>手机打开 App <b>扫码</b> 或 输入 URL 并 <b>配对</b> → 输入 4 位确认码 → 完成。<br>
+          桌面端仅显示本界面；所有控制、Agent 任务状态均在手机端查看。</div>
+      </div>
+    </div>
+
+    <div class="btn-row">
+      <button class="btn ghost" onclick="copyUrl()">▤ COPY&nbsp;URL</button>
+      <button class="btn" onclick="refresh()">↻ NEW&nbsp;PAIRING</button>
+    </div>
+
+  </div>
+
+  <div class="foot">AGENTPAGER · STYLED · HOOK PORT 49361</div>
 </div>
+
 <script>
 async function info(){try{const r=await fetch('/pair/info');return await r.json()}catch(e){return null}}
-async function tick(){
- const d=await info();
- if(!d){setTimeout(tick,2000);return}
- document.getElementById('code').textContent=d.code;
- document.getElementById('clients').textContent=d.clients;
- document.getElementById('maxc').textContent=d.max_clients;
- document.getElementById('qr').src='/pair/qr.png?t='+Date.now();
- const m=Math.max(0,Math.round(d.expires_in));const mm=Math.floor(m/60),ss=m%60;
- document.getElementById('expiry').textContent='二维码有效期 '+mm+'分'+String(ss).padStart(2,'0')+'秒';
- const adbEl=document.getElementById('adb');
- if(d.adb&&!d.adb.pending){adbEl.textContent=d.adb.message;
-  adbEl.className=d.adb.ok?'ok':'bad'}else{adbEl.textContent='检测中…';adbEl.className=''}
- const ips=(d.ips||[]).map(function(ip){return '127.0.0.1'===ip?'':(ip+':'+location.port)})
-  .filter(Boolean).join('、');
- document.getElementById('ips').textContent=ips||'--';
- setTimeout(tick,2000)
+function setWsText(ok,text){
+  const dot=document.querySelector('.brand .dot i');
+  const t=document.getElementById('wsText');
+  t.textContent=text;
+  dot.style.background=ok?'var(--Green)':'var(--Amber)';
 }
-async function refresh(){await fetch('/pair/new');tick()}
-tick()
-</script></body></html>
+async function tick(){
+  const d=await info();
+  if(!d){setWsText(false,'NO-SERVER');setTimeout(tick,2000);return}
+  setWsText(true,'ONLINE');
+  document.getElementById('code').textContent=d.code||'----';
+  document.getElementById('clients').textContent=(d.clients!=null)?d.clients:0;
+  document.getElementById('maxc').textContent=d.max_clients||2;
+  const img=document.getElementById('qr');
+  img.src='/pair/qr.png?t='+Date.now();
+  const cd=document.getElementById('clientsDot');
+  const clientsPill=document.getElementById('clientsPill');
+  if((d.clients||0)>0){cd.style.background='var(--Green)';clientsPill.classList.remove('bad','wait');}
+  else{cd.style.background='var(--Amber)';clientsPill.classList.add('wait');clientsPill.classList.remove('bad')}
+  const m=Math.max(0,Math.round(d.expires_in||0));
+  const mm=Math.floor(m/60),ss=m%60;
+  document.getElementById('expiry').textContent='EXP '+mm+'m'+String(ss).padStart(2,'0')+'s';
+  const adb=document.getElementById('adb');
+  if(d.adb){
+    if(d.adb.pending){adb.textContent='检测中…';adb.className=''}
+    else{adb.textContent=d.adb.message;adb.className=d.adb.ok?'ok':'bad'}
+  }
+  const ips=(d.ips||[]).map(function(ip){return (ip==='127.0.0.1')?'':('http://'+ip+':'+(location.port||80))}).filter(Boolean);
+  const urlEl=document.getElementById('url');
+  urlEl.textContent=d.pairing_url||('http://'+location.host+'/?pair=--');
+  document.getElementById('ips').textContent=ips.join('\n')||'--';
+  setTimeout(tick,2000);
+}
+async function refresh(){try{await fetch('/pair/new')}catch(e){}tick()}
+function copyUrl(){
+  const txt=document.getElementById('url').textContent||'';
+  const ta=document.createElement('textarea');ta.value=txt;document.body.appendChild(ta);ta.select();
+  try{document.execCommand('copy')}catch(e){}
+  document.body.removeChild(ta);
+  const btn=document.querySelector('.btn.ghost');const old=btn.textContent;btn.textContent='✓ COPIED';
+  setTimeout(function(){btn.textContent=old},900);
+}
+document.getElementById('url').addEventListener('click',copyUrl);
+tick();
+</script>
+</body></html>

@@ -1,6 +1,11 @@
-package com.viberemote.mobile.ui
+﻿package com.viberemote.mobile.ui
 
 import android.content.res.Configuration
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -24,6 +29,11 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -69,6 +79,8 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
@@ -78,96 +90,94 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.RectangleShape
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.Font
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.viberemote.mobile.R
 import com.viberemote.mobile.net.AgentStatus
 import com.viberemote.mobile.net.KeyDef
 import com.viberemote.mobile.net.PeerInfo
 import com.viberemote.mobile.net.RemoteClient
+import com.viberemote.mobile.AgentGridUiState
+import com.viberemote.mobile.ScreenBrightnessPolicy
+import com.viberemote.mobile.domain.ControlAction
+import com.viberemote.mobile.domain.LinkState
+import com.viberemote.mobile.domain.StateSnapshotPayload
+import com.viberemote.mobile.domain.TaskDashboardProjection
+import com.viberemote.mobile.domain.TaskDashboardProjector
+import com.viberemote.mobile.domain.toDomain
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
-// —— trae 风格暗色（跟随系统切换） ——
-private val Brand = Color(0xFF4F7CFF)
-private val BrandSoft = Color(0xFF7AA2FF)
-private val BgD = Color(0xFF14161A)
-private val PanelD = Color(0xFF1B1E24)
-private val Panel2D = Color(0xFF21252C)
-private val BorderD = Color(0xFF2A2F38)
-private val FgD = Color(0xFFE6E9EF)
-private val SubD = Color(0xFF8B93A3)
-private val BgL = Color(0xFFF5F6F8)
-private val PanelL = Color(0xFFFFFFFF)
-private val Panel2L = Color(0xFFECEEF3)
-private val BorderL = Color(0xFFDDE1E8)
-private val FgL = Color(0xFF1A1D23)
-private val SubL = Color(0xFF6A7280)
-private val Ok = Color(0xFF3DDC97)
-private val Warn = Color(0xFFF0B429)
-private val Err = Color(0xFFF47067)
+// ════════════════════════════════════════════════════════════════════
+// 主题（像素字体 + AgentPager 调色板）已迁移至 AgentGridTheme.kt：
+//   • PixelFont  = PixelFontFamily 的兼容别名（AgentGridTheme.kt 内定义）
+//   • AgColors   = AgentGridColors  的兼容别名（AgentGridTheme.kt 内定义）
+// 本文件直接引用，不再重复定义。
+// ════════════════════════════════════════════════════════════════════
 
-/** 主题色板：跟随系统深浅色（trae 风格） */
+// 便捷别名，AgentPager 风格：无论系统主题都是深色像素风（AgentPager 只做暗色）
 @Composable
-fun VibeColors(): androidx.compose.material3.ColorScheme {
-    return if (isSystemInDarkTheme()) darkColorScheme(
-        primary = Brand,
-        onPrimary = Color.White,
-        secondary = BrandSoft,
-        background = BgD,
-        onBackground = FgD,
-        surface = PanelD,
-        onSurface = FgD,
-        surfaceVariant = Panel2D,
-        onSurfaceVariant = SubD,
-        outline = BorderD,
-        error = Err,
-    ) else lightColorScheme(
-        primary = Brand,
-        onPrimary = Color.White,
-        secondary = BrandSoft,
-        background = BgL,
-        onBackground = FgL,
-        surface = PanelL,
-        onSurface = FgL,
-        surfaceVariant = Panel2L,
-        onSurfaceVariant = SubL,
-        outline = BorderL,
-        error = Err,
-    )
-}
-
-@Composable
-private fun ui(): UiPalette {
-    val dark = isSystemInDarkTheme()
-    return if (dark) UiPalette(BgD, PanelD, Panel2D, BorderD, FgD, SubD)
-    else UiPalette(BgL, PanelL, Panel2L, BorderL, FgL, SubL)
-}
+private fun ui() = UiPalette(
+    bg = AgColors.Bg,
+    panel = AgColors.Surface,
+    panel2 = AgColors.SurfaceRaised,
+    border = AgColors.Divider,
+    fg = AgColors.Text,
+    sub = AgColors.Muted,
+)
 
 private data class UiPalette(
     val bg: Color, val panel: Color, val panel2: Color,
     val border: Color, val fg: Color, val sub: Color,
 )
 
-// -- Agent 来源徽标 --
+// Material3 ColorScheme（AgentPager 暗色主题，不再跟随系统切换）
+@Composable
+fun VibeColors(): androidx.compose.material3.ColorScheme {
+    return darkColorScheme(
+        primary = AgColors.Amber,
+        onPrimary = AgColors.Bg,
+        secondary = AgColors.Blue,
+        onSecondary = AgColors.Text,
+        background = AgColors.Bg,
+        onBackground = AgColors.Text,
+        surface = AgColors.Surface,
+        onSurface = AgColors.Text,
+        surfaceVariant = AgColors.SurfaceRaised,
+        onSurfaceVariant = AgColors.Muted,
+        outline = AgColors.Divider,
+        error = AgColors.Red,
+        onError = AgColors.Bg,
+    )
+}
+
+// -- Agent 来源徽标（AgentPager 风格配色） --
 private fun sourceMark(source: String): Pair<String, Color> = when (source.lowercase()) {
     "claude" -> "C" to Color(0xFFD97757)
     "codex" -> "X" to Color(0xFF6E56CF)
-    "trae" -> "T" to Brand
-    "deepseek" -> "D" to Color(0xFF4D6BFE)
-    "trae solo cn", "solo" -> "S" to BrandSoft
-    else -> "?" to SubD
+    "trae" -> "T" to AgColors.Amber
+    "deepseek" -> "D" to AgColors.Blue
+    "trae solo cn", "solo" -> "S" to AgColors.Violet
+    else -> "?" to AgColors.Muted
 }
 
-// -- 状态 → 中文/颜色 --
+// -- 状态 → 中文/颜色（AgentPager 状态色） --
 private fun stateCnOf(s: String) = when (s) {
     "READY" -> "空闲"
     "WORKING", "RUNNING" -> "工作中"
@@ -178,12 +188,12 @@ private fun stateCnOf(s: String) = when (s) {
 }
 
 private fun stateColorOf(s: String) = when (s) {
-    "READY" -> Ok
-    "WORKING", "RUNNING" -> Warn
-    "THINKING" -> Brand
-    "CONFIRM", "WAITING" -> BrandSoft
-    "ERROR", "FAILED" -> Err
-    else -> SubD
+    "READY" -> AgColors.Green
+    "WORKING", "RUNNING" -> AgColors.Amber
+    "THINKING" -> AgColors.Cyan
+    "CONFIRM", "WAITING" -> AgColors.Blue
+    "ERROR", "FAILED" -> AgColors.Red
+    else -> AgColors.Muted
 }
 
 // ---------------- 页面枚举 ----------------
@@ -241,6 +251,7 @@ fun RemoteScreen(
     onConnect: () -> Unit,
     onScanQr: () -> Unit,
     onNeedsMic: () -> Unit,
+    onAgentBrightness: (Float?) -> Unit,
 ) {
     val c by client.status.collectAsState()
     val paired by client.paired.collectAsState()
@@ -263,52 +274,52 @@ fun RemoteScreen(
                         selected = page == Page.PAD,
                         onClick = { page = Page.PAD },
                         icon = { Icon(Icons.Filled.Keyboard, contentDescription = "遥控器") },
-                        label = { Text("遥控", fontSize = 11.sp) },
+                        label = { Text("遥控", fontSize = 11.sp, fontFamily = PixelFont) },
                         colors = NavigationBarItemDefaults.colors(
-                            selectedIconColor = Brand,
-                            selectedTextColor = Brand,
+                            selectedIconColor = AgColors.Amber,
+                            selectedTextColor = AgColors.Amber,
                             unselectedIconColor = u.sub,
                             unselectedTextColor = u.sub,
-                            indicatorColor = Brand.copy(alpha = 0.16f),
+                            indicatorColor = AgColors.Amber.copy(alpha = 0.16f),
                         ),
                     )
                     NavigationBarItem(
                         selected = page == Page.MOUSE,
                         onClick = { page = Page.MOUSE },
                         icon = { Icon(Icons.Filled.Mouse, contentDescription = "鼠标") },
-                        label = { Text("鼠标", fontSize = 11.sp) },
+                        label = { Text("鼠标", fontSize = 11.sp, fontFamily = PixelFont) },
                         colors = NavigationBarItemDefaults.colors(
-                            selectedIconColor = Brand,
-                            selectedTextColor = Brand,
+                            selectedIconColor = AgColors.Amber,
+                            selectedTextColor = AgColors.Amber,
                             unselectedIconColor = u.sub,
                             unselectedTextColor = u.sub,
-                            indicatorColor = Brand.copy(alpha = 0.16f),
+                            indicatorColor = AgColors.Amber.copy(alpha = 0.16f),
                         ),
                     )
                     NavigationBarItem(
                         selected = page == Page.HOT,
                         onClick = { page = Page.HOT },
                         icon = { Icon(Icons.Filled.SmartButton, contentDescription = "快捷键") },
-                        label = { Text("快捷键", fontSize = 11.sp) },
+                        label = { Text("快捷键", fontSize = 11.sp, fontFamily = PixelFont) },
                         colors = NavigationBarItemDefaults.colors(
-                            selectedIconColor = Brand,
-                            selectedTextColor = Brand,
+                            selectedIconColor = AgColors.Amber,
+                            selectedTextColor = AgColors.Amber,
                             unselectedIconColor = u.sub,
                             unselectedTextColor = u.sub,
-                            indicatorColor = Brand.copy(alpha = 0.16f),
+                            indicatorColor = AgColors.Amber.copy(alpha = 0.16f),
                         ),
                     )
                     NavigationBarItem(
                         selected = page == Page.AGENT,
                         onClick = { page = Page.AGENT },
                         icon = { Icon(Icons.Filled.Devices, contentDescription = "Agent") },
-                        label = { Text("Agent", fontSize = 11.sp) },
+                        label = { Text("Agent", fontSize = 11.sp, fontFamily = PixelFont) },
                         colors = NavigationBarItemDefaults.colors(
-                            selectedIconColor = Brand,
-                            selectedTextColor = Brand,
+                            selectedIconColor = AgColors.Amber,
+                            selectedTextColor = AgColors.Amber,
                             unselectedIconColor = u.sub,
                             unselectedTextColor = u.sub,
-                            indicatorColor = Brand.copy(alpha = 0.16f),
+                            indicatorColor = AgColors.Amber.copy(alpha = 0.16f),
                         ),
                     )
                 }
@@ -373,7 +384,7 @@ fun RemoteScreen(
                         )
                         Page.MOUSE -> MousePage(client)
                         Page.HOT -> HotPage(client, keys = keymap)
-                        Page.AGENT -> AgentPage(client = client, status = c, phase = phase, sessionMsg = sessionMsg)
+                        Page.AGENT -> AgentPage(client = client, onAgentBrightness = onAgentBrightness)
                     }
                 }
             }
@@ -427,50 +438,51 @@ private fun ConnectPage(
             }
         }
 
-        // 选中方案的使用说明
+        // 选中方案的使用说明（AgentPager 风格：sharp border + Surface）
         Box(
             Modifier
                 .fillMaxWidth()
-                .clip(RoundedCornerShape(12.dp))
                 .background(u.panel)
-                .border(1.dp, u.border, RoundedCornerShape(12.dp))
+                .border(1.dp, u.border)
                 .padding(12.dp),
         ) {
             Column {
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    Icon(selected.icon, contentDescription = null, tint = Brand, modifier = Modifier.size(18.dp))
+                    Icon(selected.icon, contentDescription = null, tint = AgColors.Amber, modifier = Modifier.size(18.dp))
                     Spacer(Modifier.width(6.dp))
                     Text(
                         "如何使用「${selected.title}」",
                         color = u.fg, fontSize = 13.sp, fontWeight = FontWeight.SemiBold,
+                        fontFamily = PixelFont,
                     )
                 }
                 Spacer(Modifier.height(6.dp))
                 Text(
                     selected.hint,
                     color = u.sub, fontSize = 12.sp, lineHeight = 18.sp,
+                    fontFamily = PixelFont,
                 )
             }
         }
 
-        // 扫码 + 连接按钮
+        // 扫码 + 连接按钮（AgentPager 风格：RectangleShape 直角 + Amber 主色）
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             Button(
                 onClick = onScanQr,
                 modifier = Modifier.weight(1f).height(46.dp),
-                shape = RoundedCornerShape(12.dp),
-                colors = ButtonDefaults.buttonColors(containerColor = Brand),
+                shape = RectangleShape,
+                colors = ButtonDefaults.buttonColors(containerColor = AgColors.Amber),
             ) {
-                Icon(Icons.Filled.QrCodeScanner, contentDescription = null, modifier = Modifier.size(16.dp))
+                Icon(Icons.Filled.QrCodeScanner, contentDescription = null, modifier = Modifier.size(16.dp), tint = AgColors.Bg)
                 Spacer(Modifier.width(6.dp))
-                Text("扫码连接", color = Color.White, fontSize = 13.sp)
+                Text("扫码连接", color = AgColors.Bg, fontSize = 13.sp, fontFamily = PixelFont, fontWeight = FontWeight.Bold)
             }
             OutlinedButton(
                 onClick = onConnect,
                 modifier = Modifier.weight(1f).height(46.dp),
-                shape = RoundedCornerShape(12.dp),
+                shape = RectangleShape,
             ) {
-                Icon(Icons.Filled.Cable, contentDescription = null, modifier = Modifier.size(16.dp))
+                Icon(Icons.Filled.Cable, contentDescription = null, modifier = Modifier.size(16.dp), tint = AgColors.Amber)
                 Spacer(Modifier.width(6.dp))
                 Text("直接连接", color = u.fg, fontSize = 13.sp)
             }
@@ -480,7 +492,6 @@ private fun ConnectPage(
         Box(
             Modifier
                 .fillMaxWidth()
-                .clip(RoundedCornerShape(14.dp))
                 .background(u.panel)
                 .padding(12.dp),
         ) {
@@ -503,7 +514,7 @@ private fun ConnectPage(
                     },
                     singleLine = true,
                     textStyle = MaterialTheme.typography.bodySmall,
-                    shape = RoundedCornerShape(10.dp),
+                    shape = RectangleShape,
                 )
             }
         }
@@ -518,12 +529,10 @@ private fun WayButton(
     modifier: Modifier = Modifier,
 ) {
     val u = ui()
-    val radius = RoundedCornerShape(14.dp)
     Box(
         modifier
-            .clip(radius)
-            .background(if (selected) Brand.copy(alpha = 0.14f) else u.panel)
-            .border(1.4.dp, if (selected) Brand else u.border, radius)
+            .background(if (selected) AgColors.Amber.copy(alpha = 0.14f) else u.panel)
+            .border(1.dp, if (selected) AgColors.Amber else u.border)
             .height(72.dp)
             .pointerInput(way.id) {
                 awaitEachGesture {
@@ -542,21 +551,21 @@ private fun WayButton(
             Box(
                 Modifier
                     .size(40.dp)
-                    .clip(RoundedCornerShape(10.dp))
-                    .background(if (selected) Brand else u.panel2),
+                    .background(if (selected) AgColors.Amber else u.panel2),
                 contentAlignment = Alignment.Center,
             ) {
                 Icon(
                     way.icon,
                     contentDescription = way.title,
-                    tint = if (selected) Color.White else u.sub,
+                    tint = if (selected) AgColors.Bg else u.sub,
                     modifier = Modifier.size(22.dp),
                 )
             }
             Text(
                 way.title,
-                color = if (selected) Brand else u.fg,
+                color = if (selected) AgColors.Amber else u.fg,
                 fontSize = 13.sp,
+                fontFamily = PixelFont,
                 fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Medium,
                 maxLines = 2,
                 overflow = TextOverflow.Ellipsis,
@@ -638,8 +647,8 @@ private fun DPad(dpad: List<KeyDef>, client: RemoteClient, enterDef: KeyDef?) {
                     Modifier
                         .size(cell)
                         .clip(CircleShape)
-                        .background(if (pressed) Brand.copy(alpha = 0.3f) else u.panel2, CircleShape)
-                        .border(1.5.dp, if (pressed) Brand else u.border, CircleShape)
+                        .background(if (pressed) AgColors.Amber.copy(alpha = 0.3f) else u.panel2, CircleShape)
+                        .border(1.5.dp, if (pressed) AgColors.Amber else u.border, CircleShape)
                         .pointerInput(enterDef.id) {
                             awaitEachGesture {
                                 awaitFirstDown()
@@ -654,7 +663,7 @@ private fun DPad(dpad: List<KeyDef>, client: RemoteClient, enterDef: KeyDef?) {
                     Icon(
                         Icons.AutoMirrored.Filled.KeyboardReturn,
                         contentDescription = enterDef.label,
-                        tint = if (pressed) Brand else u.fg,
+                        tint = if (pressed) AgColors.Amber else u.fg,
                         modifier = Modifier.size(22.dp),
                     )
                 }
@@ -783,9 +792,8 @@ private fun TouchArea(client: RemoteClient, modifier: Modifier) {
 
     Box(
         modifier
-            .clip(RoundedCornerShape(14.dp))
             .background(u.panel)
-            .border(1.dp, if (moving) Brand else u.border, RoundedCornerShape(14.dp))
+            .border(1.dp, if (moving) AgColors.Amber else u.border)
             .pointerInput(Unit) {
                 awaitEachGesture {
                     val down = awaitFirstDown()
@@ -817,11 +825,11 @@ private fun TouchArea(client: RemoteClient, modifier: Modifier) {
         contentAlignment = Alignment.Center,
     ) {
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
-            Icon(Icons.Filled.Mouse, contentDescription = "触控板", tint = if (moving) Brand else u.sub, modifier = Modifier.size(36.dp))
+            Icon(Icons.Filled.Mouse, contentDescription = "触控板", tint = if (moving) AgColors.Amber else u.sub, modifier = Modifier.size(36.dp))
             Spacer(Modifier.height(4.dp))
             Text(
                 if (moving) "移动中…" else "拖动移动鼠标 · 轻点左键",
-                color = if (moving) BrandSoft else u.sub,
+                color = if (moving) AgColors.Yellow else u.sub,
                 fontSize = 12.sp,
                 textAlign = TextAlign.Center,
             )
@@ -835,9 +843,8 @@ private fun MouseButton(label: String, onClick: () -> Unit, modifier: Modifier) 
     var pressed by remember { mutableStateOf(false) }
     Box(
         modifier
-            .clip(RoundedCornerShape(10.dp))
-            .background(if (pressed) Brand.copy(alpha = 0.25f) else u.panel2)
-            .border(1.dp, if (pressed) Brand else u.border, RoundedCornerShape(10.dp))
+            .background(if (pressed) AgColors.Amber.copy(alpha = 0.25f) else u.panel2)
+            .border(1.dp, if (pressed) AgColors.Amber else u.border)
             .pointerInput(Unit) {
                 awaitEachGesture {
                     awaitFirstDown(); pressed = true; onClick(); waitForUpOrCancellation(); pressed = false
@@ -857,9 +864,8 @@ private fun ScrollButton(client: RemoteClient, dy: Int, label: String, modifier:
     val scope = rememberCoroutineScope()
     Box(
         modifier
-            .clip(RoundedCornerShape(10.dp))
-            .background(if (pressed) Brand.copy(alpha = 0.25f) else u.panel2)
-            .border(1.dp, if (pressed) Brand else u.border, RoundedCornerShape(10.dp))
+            .background(if (pressed) AgColors.Amber.copy(alpha = 0.25f) else u.panel2)
+            .border(1.dp, if (pressed) AgColors.Amber else u.border)
             .pointerInput(dy) {
                 awaitEachGesture {
                     awaitFirstDown()
@@ -940,9 +946,8 @@ private fun ClipButton(def: KeyDef, onTap: () -> Unit, modifier: Modifier) {
     var pressed by remember { mutableStateOf(false) }
     Box(
         modifier
-            .clip(RoundedCornerShape(12.dp))
-            .background(if (pressed) Brand.copy(alpha = 0.25f) else u.panel2)
-            .border(1.dp, if (pressed) Brand else u.border, RoundedCornerShape(12.dp))
+            .background(if (pressed) AgColors.Amber.copy(alpha = 0.25f) else u.panel2)
+            .border(1.dp, if (pressed) AgColors.Amber else u.border)
             .pointerInput(Unit) {
                 awaitEachGesture {
                     awaitFirstDown(); pressed = true; onTap(); waitForUpOrCancellation(); pressed = false
@@ -952,7 +957,7 @@ private fun ClipButton(def: KeyDef, onTap: () -> Unit, modifier: Modifier) {
         contentAlignment = Alignment.Center,
     ) {
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
-            Icon(keyIcon(def) ?: Icons.Filled.ContentPaste, contentDescription = def.label, tint = Brand, modifier = Modifier.size(26.dp))
+            Icon(keyIcon(def) ?: Icons.Filled.ContentPaste, contentDescription = def.label, tint = AgColors.Amber, modifier = Modifier.size(26.dp))
             Spacer(Modifier.height(4.dp))
             Text(def.label, color = u.fg, fontSize = 13.sp, fontWeight = FontWeight.Bold)
             Text(mappingText(def), color = u.sub, fontSize = 9.sp)
@@ -996,9 +1001,8 @@ fun PressKeyButton(
     val isNum = def.id.startsWith("n") && def.id.length == 2 && icon == null
     Box(
         modifier = modifier
-            .clip(RoundedCornerShape(10.dp))
-            .background(if (pressed) Brand.copy(alpha = 0.25f) else u.panel2, RoundedCornerShape(10.dp))
-            .border(1.dp, if (pressed) Brand else u.border, RoundedCornerShape(10.dp))
+            .background(if (pressed) AgColors.Amber.copy(alpha = 0.25f) else u.panel2)
+            .border(1.dp, if (pressed) AgColors.Amber else u.border)
             .pointerInput(def.id) {
                 awaitEachGesture {
                     awaitFirstDown()
@@ -1027,7 +1031,7 @@ fun PressKeyButton(
             } else {
                 Text(def.display.ifBlank { def.label }, color = u.fg, fontSize = 13.sp, fontWeight = FontWeight.Bold)
             }
-            if (isCombo(def)) Text(mappingText(def), color = BrandSoft, fontSize = 7.sp, maxLines = 1)
+            if (isCombo(def)) Text(mappingText(def), color = AgColors.Yellow, fontSize = 7.sp, maxLines = 1)
         }
     }
 }
@@ -1050,9 +1054,8 @@ fun DeviceChip(
     val u = ui()
     Row(
         modifier
-            .clip(RoundedCornerShape(18.dp))
             .background(u.panel)
-            .border(1.dp, u.border, RoundedCornerShape(18.dp))
+            .border(1.dp, u.border)
             .clickable(enabled = onClick != null) { onClick?.invoke() }
             .padding(horizontal = 10.dp, vertical = 4.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -1060,7 +1063,7 @@ fun DeviceChip(
         Icon(
             Icons.Filled.Devices,
             contentDescription = "设备",
-            tint = if (onClick != null) Brand else u.sub,
+            tint = if (onClick != null) AgColors.Amber else u.sub,
             modifier = Modifier.size(14.dp),
         )
         Spacer(Modifier.width(5.dp))
@@ -1091,7 +1094,6 @@ private fun DeviceDialog(
                         Row(
                             Modifier
                                 .fillMaxWidth()
-                                .clip(RoundedCornerShape(10.dp))
                                 .background(u.panel2)
                                 .padding(horizontal = 10.dp, vertical = 8.dp),
                             verticalAlignment = Alignment.CenterVertically,
@@ -1100,7 +1102,7 @@ private fun DeviceDialog(
                                 Modifier
                                     .size(10.dp)
                                     .clip(CircleShape)
-                                    .background(if (p.online) Ok else u.sub),
+                                    .background(if (p.online) AgColors.Green else u.sub),
                             )
                             Spacer(Modifier.width(8.dp))
                             Column(Modifier.weight(1f)) {
@@ -1113,13 +1115,12 @@ private fun DeviceDialog(
                             Box(
                                 Modifier
                                     .size(28.dp)
-                                    .clip(RoundedCornerShape(8.dp))
                                     .background(u.panel)
-                                    .border(1.dp, u.border, RoundedCornerShape(8.dp))
+                                    .border(1.dp, u.border)
                                     .clickable { onDelete(p.id) },
                                 contentAlignment = Alignment.Center,
                             ) {
-                                Icon(Icons.Filled.Close, contentDescription = "删除", tint = Err, modifier = Modifier.size(16.dp))
+                                Icon(Icons.Filled.Close, contentDescription = "删除", tint = AgColors.Red, modifier = Modifier.size(16.dp))
                             }
                         }
                     }
@@ -1130,18 +1131,18 @@ private fun DeviceDialog(
             Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                 OutlinedButton(
                     onClick = { onDisconnect(); onDismiss() },
-                    shape = RoundedCornerShape(10.dp),
+                    shape = RectangleShape,
                 ) { Text("返回初始界面", color = u.fg, fontSize = 11.sp) }
                 OutlinedButton(
                     onClick = onReconnect,
-                    shape = RoundedCornerShape(10.dp),
-                ) { Text("重新连接", color = Brand, fontSize = 11.sp) }
+                    shape = RectangleShape,
+                ) { Text("重新连接", color = AgColors.Amber, fontSize = 11.sp) }
             }
         },
         dismissButton = {
             OutlinedButton(
                 onClick = onDismiss,
-                shape = RoundedCornerShape(10.dp),
+                shape = RectangleShape,
             ) { Text("关闭", color = u.sub, fontSize = 12.sp) }
         },
     )
@@ -1151,14 +1152,13 @@ private fun DeviceDialog(
 fun ConnPill(text: String, ok: Boolean, modifier: Modifier = Modifier) {
     val u = ui()
     val c = when {
-        ok -> Ok
-        text.contains("失败") -> Err
-        else -> Warn
+        ok -> AgColors.Green
+        text.contains("失败") -> AgColors.Red
+        else -> AgColors.Amber
     }
     Row(
         verticalAlignment = Alignment.CenterVertically,
         modifier = modifier
-            .clip(RoundedCornerShape(18.dp))
             .background(u.panel2)
             .padding(horizontal = 10.dp, vertical = 4.dp),
     ) {
@@ -1178,364 +1178,113 @@ fun PairingCard(
 ) {
 }
 
-// ================= AgentPager 风格页面（深色像素风） =================
-// 调色板对齐 AgentPager-main AgentGridTheme.kt
-private val AgBg = Color(0xFF05070B)
-private val AgSurface = Color(0xFF0B1018)
-private val AgSurfaceRaised = Color(0xFF101824)
-private val AgDivider = Color(0xFF18212E)
-private val AgText = Color(0xFFE8EDF5)
-private val AgMuted = Color(0xFF7F8A9A)
-private val AgDimmed = Color(0xFF4F5968)
-private val AgBlue = Color(0xFF60A5FA)
-private val AgCyan = Color(0xFF5EEAD4)
-private val AgViolet = Color(0xFFA78BFA)
-private val AgAmber = Color(0xFFFDBA4A)
-private val AgGreen = Color(0xFF4ADE80)
-private val AgRed = Color(0xFFFB7185)
+// ================= AgentPager AgentGridScreen 接线（net → domain 映射 + 投影 + 控制回调） =================
+// 移植自 AgentPager AgentGridViewModel + MainActivity 的驱动逻辑：
+//   • net wire 模型 → domain 枚举模型（ModelMapping.toDomain）
+//   • TaskDashboardProjector 投影（排序/置顶展开/紧急识别/自动仪表盘切换）
+//   • 控制回调 → RemoteClient.taskControl（含 DELETE 双步确认，桌面端已支持）
+//   • 屏幕亮度策略：焦点任务激活时按设置调亮，离开 Agent 页恢复系统亮度
 
-private fun agSourceMark(source: String): Pair<String, Color> = when (source.lowercase()) {
-    "claude" -> "C" to Color(0xFFD97757)
-    "codex" -> "X" to Color(0xFF6E56CF)
-    "trae" -> "T" to AgAmber
-    "deepseek" -> "D" to AgBlue
-    "trae solo cn", "solo" -> "S" to AgViolet
-    else -> "?" to AgMuted
+private fun ControlAction.toWire(): String = when (this) {
+    ControlAction.APPROVE -> "approve"
+    ControlAction.DENY -> "deny"
+    ControlAction.ANSWER -> "answer"
+    ControlAction.INTERRUPT -> "interrupt"
+    ControlAction.RETRY -> "retry"
+    ControlAction.MUTE -> "mute"
+    ControlAction.MARK_READ -> "markread"
+    ControlAction.PIN -> "pin"
+    ControlAction.DELETE -> "delete"
 }
 
-private fun agStateCn(s: String) = when (s) {
-    "READY" -> "空闲"
-    "WORKING", "RUNNING" -> "工作中"
-    "THINKING" -> "思考中"
-    "CONFIRM", "WAITING" -> "待确认"
-    "ERROR", "FAILED" -> "出错"
-    else -> s
-}
-
-private fun agStateColor(s: String) = when (s) {
-    "READY" -> AgGreen
-    "WORKING", "RUNNING" -> AgAmber
-    "THINKING" -> AgCyan
-    "CONFIRM", "WAITING" -> AgBlue
-    "ERROR", "FAILED" -> AgRed
-    else -> AgMuted
-}
-
-/** AgentPager 风格主页面 */
 @Composable
 private fun AgentPage(
     client: RemoteClient,
-    status: AgentStatus,
-    phase: String,
-    sessionMsg: String,
+    onAgentBrightness: (Float?) -> Unit,
 ) {
-    val conn by client.connText.collectAsState()
-    val peers by client.peers.collectAsState()
-    val clients by client.clients.collectAsState()
-    val maxClients by client.maxClients.collectAsState()
-    val lastVoice by client.lastVoice.collectAsState()
-    val logs by client.logs.collectAsState()
-    val pairing = conn.contains("配对") || conn.contains("握手")
-    val offline = conn.contains("失败") || conn.contains("断开")
+    val tasks by client.tasks.collectAsState()
+    val focusedTaskID by client.focusedTaskID.collectAsState()
+    val pendingRequests by client.pendingRequests.collectAsState()
+    val usage by client.usage.collectAsState()
+    val paired by client.paired.collectAsState()
 
-    Box(
-        Modifier
-            .fillMaxSize()
-            .background(AgBg)
-            .padding(horizontal = 16.dp, vertical = 10.dp),
-    ) {
-        Column(Modifier.fillMaxSize()) {
-            // —— 顶栏：标题 + 状态点 ——
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(
-                    "AGENTPAGER",
-                    color = AgText,
-                    fontSize = 18.sp,
-                    fontWeight = FontWeight.Bold,
-                    letterSpacing = 2.sp,
-                )
-                Spacer(Modifier.weight(1f))
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    val dotColor = when {
-                        pairing -> AgAmber
-                        offline -> AgRed
-                        else -> AgGreen
-                    }
-                    Box(
-                        Modifier
-                            .size(8.dp)
-                            .background(dotColor),
-                    )
-                    Spacer(Modifier.width(6.dp))
-                    Text(
-                        conn,
-                        color = AgMuted,
-                        fontSize = 10.sp,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                }
-            }
-            Spacer(Modifier.height(10.dp))
+    // 进入 Agent 页即向桌面端请求一次用量刷新
+    LaunchedEffect(Unit) { client.getUsage() }
 
-            // —— 当前 Agent 状态卡（仿 AgentPager TaskRow 顶部）——
-            AgStatusBlock(status)
-            Spacer(Modifier.height(10.dp))
-
-            // —— 语音会话状态 ——
-            AgSessionBlock(phase = phase, message = sessionMsg, lastVoice = lastVoice)
-            Spacer(Modifier.height(10.dp))
-
-            // —— 设备列表（仿 AgentPager UsagePill） ——
-            AgDeviceBlock(
-                peers = peers,
-                clientsCount = clients,
-                maxClients = maxClients,
-            )
-            Spacer(Modifier.height(10.dp))
-
-            // —— 日志流（仿 AgentPager LazyColumn） ——
-            AgLogBlock(logs = logs)
-        }
-    }
-}
-
-@Composable
-private fun AgStatusBlock(status: AgentStatus) {
-    val (mark, markColor) = agSourceMark(status.source)
-    val stateColor = agStateColor(status.state)
-    val stateCn = agStateCn(status.state)
-    Column(
-        Modifier
-            .fillMaxWidth()
-            .background(AgSurface)
-            .border(1.dp, AgDivider)
-            .padding(12.dp),
-    ) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            // 像素风徽标
-            Box(
-                Modifier
-                    .size(38.dp)
-                    .background(markColor.copy(alpha = 0.18f)),
-                contentAlignment = Alignment.Center,
-            ) {
-                Text(
-                    mark,
-                    color = markColor,
-                    fontSize = 18.sp,
-                    fontWeight = FontWeight.Black,
-                )
-            }
-            Spacer(Modifier.width(12.dp))
-            Column(Modifier.weight(1f)) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text(
-                        if (status.source.isBlank()) "AGENT" else status.source.uppercase(),
-                        color = AgText,
-                        fontSize = 14.sp,
-                        fontWeight = FontWeight.Bold,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                    Spacer(Modifier.width(8.dp))
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Box(
-                            Modifier
-                                .size(6.dp)
-                                .background(stateColor),
-                        )
-                        Spacer(Modifier.width(4.dp))
-                        Text(stateCn, color = stateColor, fontSize = 11.sp, fontWeight = FontWeight.Bold)
-                    }
-                }
-                Spacer(Modifier.height(3.dp))
-                Text(
-                    status.state.uppercase(),
-                    color = AgDimmed,
-                    fontSize = 10.sp,
-                    letterSpacing = 1.sp,
-                )
-            }
-        }
-        Spacer(Modifier.height(8.dp))
-        Text(
-            if (status.message.isBlank()) "（空闲，等待指令）" else status.message,
-            color = AgText,
-            fontSize = 12.5.sp,
-            lineHeight = 18.sp,
-            maxLines = 3,
-            overflow = TextOverflow.Ellipsis,
+    val snapshot = remember(tasks, focusedTaskID, pendingRequests, usage) {
+        StateSnapshotPayload(
+            tasks = tasks.map { it.toDomain() },
+            usage = usage?.toDomain(),
+            focusedTaskID = focusedTaskID,
+            pendingRequests = pendingRequests.map { it.toDomain() },
         )
-        if (status.project.isNotBlank()) {
-            Spacer(Modifier.height(6.dp))
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text("PROJECT", color = AgDimmed, fontSize = 10.sp, letterSpacing = 1.sp)
-                Spacer(Modifier.width(6.dp))
-                Text(
-                    status.project,
-                    color = AgCyan,
-                    fontSize = 11.sp,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
-            }
-        }
     }
+
+    var projection by remember { mutableStateOf(TaskDashboardProjection.empty()) }
+    var activeTaskBrightness by remember {
+        mutableStateOf(ScreenBrightnessPolicy.DEFAULT_ACTIVE_BRIGHTNESS)
+    }
+
+    // 快照变化 → 重新投影（对齐 AgentPager AgentGridViewModel 的状态收集逻辑）
+    LaunchedEffect(snapshot) {
+        projection = TaskDashboardProjector.project(
+            snapshot = snapshot,
+            previous = projection,
+            now = System.currentTimeMillis(),
+        )
+    }
+
+    // 全部任务终态闲置 90 秒 → 自动切回用量仪表盘（对齐 scheduleDashboardTransition）
+    LaunchedEffect(projection.nextDashboardAt) {
+        val transitionAt = projection.nextDashboardAt ?: return@LaunchedEffect
+        if (projection.manualDashboardOverride != null) return@LaunchedEffect
+        delay((transitionAt - System.currentTimeMillis()).coerceAtLeast(0L))
+        projection = TaskDashboardProjector.project(
+            snapshot = snapshot,
+            previous = projection,
+            now = System.currentTimeMillis(),
+        )
+    }
+
+    val state = AgentGridUiState(
+        linkState = if (paired) LinkState.CONNECTED else LinkState.DISCONNECTED,
+        taskProjection = projection,
+        usage = snapshot.usage,
+        pendingRequests = snapshot.pendingRequests,
+        activeTaskBrightness = activeTaskBrightness,
+    )
+
+    // AgentPager 屏幕亮度策略：跟随焦点任务生命周期（离开本页时恢复系统亮度）
+    LaunchedEffect(state.focusedTask?.lifecycle, state.activeTaskBrightness) {
+        onAgentBrightness(
+            ScreenBrightnessPolicy.brightnessFor(
+                lifecycle = state.focusedTask?.lifecycle,
+                activeBrightness = state.activeTaskBrightness,
+            ),
+        )
+    }
+    DisposableEffect(Unit) {
+        onDispose { onAgentBrightness(null) }
+    }
+
+    AgentGridScreen(
+        state = state,
+        onControl = { id, action, value ->
+            client.taskControl(id, action.toWire(), value)
+        },
+        onFocus = { id ->
+            projection = projection.focusing(id)
+        },
+        onToggleDashboard = {
+            projection = projection.togglingDashboard()
+        },
+        onActiveTaskBrightnessChange = { value ->
+            activeTaskBrightness = ScreenBrightnessPolicy.sanitizeActiveBrightness(value)
+        },
+    )
 }
 
-@Composable
-private fun AgSessionBlock(phase: String, message: String, lastVoice: String) {
-    val phaseCn = when (phase) {
-        "idle" -> "空闲"
-        "starting" -> "启动中"
-        "capturing" -> "录音中"
-        "error" -> "出错"
-        else -> phase
-    }
-    val phaseColor = when (phase) {
-        "capturing" -> AgAmber
-        "starting" -> AgCyan
-        "error" -> AgRed
-        else -> AgGreen
-    }
-    Column(
-        Modifier
-            .fillMaxWidth()
-            .background(AgSurface)
-            .border(1.dp, AgDivider)
-            .padding(12.dp),
-    ) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            // 像素风状态点（闪烁样）
-            Box(
-                Modifier
-                    .size(8.dp)
-                    .background(phaseColor),
-            )
-            Spacer(Modifier.width(8.dp))
-            Text("VOICE SESSION", color = AgMuted, fontSize = 10.sp, letterSpacing = 1.sp)
-            Spacer(Modifier.weight(1f))
-            Text(phaseCn, color = phaseColor, fontSize = 11.sp, fontWeight = FontWeight.Bold)
-        }
-        if (message.isNotBlank()) {
-            Spacer(Modifier.height(6.dp))
-            Text(message, color = AgText, fontSize = 12.sp, lineHeight = 16.sp)
-        }
-        if (lastVoice.isNotBlank()) {
-            Spacer(Modifier.height(6.dp))
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text("LAST", color = AgDimmed, fontSize = 9.sp, letterSpacing = 1.sp)
-                Spacer(Modifier.width(6.dp))
-                Text(
-                    lastVoice,
-                    color = AgCyan,
-                    fontSize = 11.sp,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
-            }
-        }
-    }
-}
-
-@Composable
-private fun AgDeviceBlock(
-    peers: List<PeerInfo>,
-    clientsCount: Int,
-    maxClients: Int,
-) {
-    Column(
-        Modifier
-            .fillMaxWidth()
-            .background(AgSurface)
-            .border(1.dp, AgDivider)
-            .padding(12.dp),
-    ) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Text("DEVICES", color = AgMuted, fontSize = 10.sp, letterSpacing = 1.sp)
-            Spacer(Modifier.weight(1f))
-            Text(
-                "$clientsCount/$maxClients",
-                color = if (clientsCount > 0) AgCyan else AgDimmed,
-                fontSize = 12.sp,
-                fontWeight = FontWeight.Bold,
-            )
-        }
-        Spacer(Modifier.height(8.dp))
-        if (peers.isEmpty()) {
-            Text("暂无设备记录", color = AgDimmed, fontSize = 11.sp)
-        } else {
-            peers.forEach { p ->
-                Row(
-                    Modifier
-                        .fillMaxWidth()
-                        .padding(vertical = 4.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Box(
-                        Modifier
-                            .size(6.dp)
-                            .background(if (p.online) AgGreen else AgDimmed),
-                    )
-                    Spacer(Modifier.width(8.dp))
-                    Text(
-                        p.name.ifBlank { p.id },
-                        color = AgText,
-                        fontSize = 12.sp,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.weight(1f),
-                    )
-                    Text(
-                        p.ip.ifBlank { "—" },
-                        color = AgMuted,
-                        fontSize = 10.sp,
-                        maxLines = 1,
-                    )
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun AgLogBlock(logs: List<Pair<Long, String>>) {
-    Column(
-        Modifier
-            .fillMaxWidth()
-            .background(AgSurface)
-            .border(1.dp, AgDivider)
-            .padding(12.dp),
-    ) {
-        Text("LOG STREAM", color = AgMuted, fontSize = 10.sp, letterSpacing = 1.sp)
-        Spacer(Modifier.height(8.dp))
-        if (logs.isEmpty()) {
-            Text("（无日志）", color = AgDimmed, fontSize = 11.sp)
-        } else {
-            val format = java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.getDefault())
-            logs.take(8).forEach { (ts, text) ->
-                Row(Modifier.fillMaxWidth().padding(vertical = 2.dp)) {
-                    Text(
-                        format.format(java.util.Date(ts)),
-                        color = AgDimmed,
-                        fontSize = 9.sp,
-                    )
-                    Spacer(Modifier.width(6.dp))
-                    Text(
-                        text,
-                        color = AgText,
-                        fontSize = 10.sp,
-                        maxLines = 2,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                }
-            }
-        }
-    }
-}
-
-/** Agent 状态卡（AgentPager 风格，紧凑版适配一屏布局） */
+/** Agent 状态卡（AgentPager 风格，用于首页其他页面的紧凑版） */
 @Composable
 fun StatusCard(status: AgentStatus, modifier: Modifier = Modifier) {
     val u = ui()
@@ -1545,18 +1294,16 @@ fun StatusCard(status: AgentStatus, modifier: Modifier = Modifier) {
 
     Column(
         modifier
-            .clip(RoundedCornerShape(12.dp))
             .background(u.panel)
-            .border(1.dp, u.border, RoundedCornerShape(12.dp))
+            .border(1.dp, u.border)
             .padding(10.dp),
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Box(
                 Modifier
                     .size(34.dp)
-                    .clip(RoundedCornerShape(10.dp))
                     .background(markColor.copy(alpha = 0.16f))
-                    .border(1.dp, markColor.copy(alpha = 0.5f), RoundedCornerShape(10.dp)),
+                    .border(1.dp, markColor.copy(alpha = 0.5f)),
                 contentAlignment = Alignment.Center,
             ) {
                 Text(mark, color = markColor, fontSize = 15.sp, fontWeight = FontWeight.Black)
@@ -1573,7 +1320,6 @@ fun StatusCard(status: AgentStatus, modifier: Modifier = Modifier) {
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
                         modifier = Modifier
-                            .clip(RoundedCornerShape(20.dp))
                             .background(stateColor.copy(alpha = 0.14f))
                             .padding(horizontal = 6.dp, vertical = 1.dp),
                     ) {
@@ -1615,7 +1361,6 @@ fun VoiceBar(
 
     Box(
         modifier
-            .clip(RoundedCornerShape(12.dp))
             .background(u.panel)
             .padding(vertical = 10.dp, horizontal = 12.dp),
     ) {
@@ -1623,9 +1368,8 @@ fun VoiceBar(
             Modifier
                 .fillMaxWidth()
                 .height(54.dp)
-                .clip(RoundedCornerShape(12.dp))
-                .background(if (pttActive) Brand.copy(alpha = 0.30f) else u.panel2)
-                .border(1.dp, if (pttActive) Brand else u.border, RoundedCornerShape(12.dp))
+                .background(if (pttActive) AgColors.Amber.copy(alpha = 0.30f) else u.panel2)
+                .border(1.dp, if (pttActive) AgColors.Amber else u.border)
                 .clickable {
                     if (!pttActive) {
                         // 点击启动：先请求麦克风权限，再发 hold_start + 开始录音
@@ -1651,7 +1395,7 @@ fun VoiceBar(
         }
         if (tip.isNotBlank()) {
             Spacer(Modifier.height(4.dp))
-            Text(tip, color = Warn, fontSize = 10.sp)
+            Text(tip, color = AgColors.Amber, fontSize = 10.sp)
         }
     }
 }

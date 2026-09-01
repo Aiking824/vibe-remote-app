@@ -84,6 +84,8 @@ except Exception:
 
 from audio_default_switch import AudioDefaultSwitch, find_cable_output
 from audio_sink import AudioSink
+from codex_rollout import CodexRolloutObserver, RolloutSignal
+from codex_usage import CodexUsageLoader
 from key_injector import KeyInjector, VK
 from keymap import ACTIONS, KeymapError, KeymapStore
 from pairing import PairingManager
@@ -222,6 +224,21 @@ class VibeRemoteServer:
         self.speech: None = None
         self._rec_log: list = []  # 最近语音/日志（UI 拉取用）
         self.adb_status: dict = {"pending": True, "ok": False, "message": "检测中…"}
+
+        # ========== AgentPager 风格 Hook 状态聚合（方案 B）==========
+        # tasks: session_id -> TaskSnapshot dict（与 AgentPager WireModels.TaskSnapshot 字段对齐）
+        # pending_permission: session_id -> socket（TCP socket，用于回写 allow/deny 决策）
+        self.tasks: dict[str, dict] = {}
+        # 手机端删除过的 session：hook / rollout 信号不再复活这些任务
+        self.deleted_tasks: set[str] = set()
+        self._pending_permission: dict[str, socket.socket] = {}
+        self._hook_tcp_server: asyncio.Server | None = None
+        self.hook_port: int = int(config.get("hook_port", 49361))
+        # Codex rollout 观察器（细粒度状态：思考/执行/token/子代理）与用量加载器
+        self.rollout = CodexRolloutObserver()
+        self.usage_loader = CodexUsageLoader()
+        self.usage_snapshot: dict | None = None
+        self._usage_loading = False
 
         status_file = str(config.get("status_file") or "").strip()
         if not status_file:
@@ -568,6 +585,14 @@ class VibeRemoteServer:
                 websocket,
                 {"type": "paired", "id": client["id"], "max_clients": self.max_clients},
             )
+            # 配对成功立即把当前 tasks snapshot（AgentPager 风格）推给手机
+            snapshot = sorted(self.tasks.values(), key=lambda t: -(self._effective_priority(t)))
+            await self._send_json(websocket, {
+                "type": "tasks",
+                "tasks": snapshot,
+                "focusedTaskID": None,
+                "pendingRequests": self._pending_requests(),
+            })
             if self.loop:
                 self.loop.call_soon_threadsafe(self.broadcast_peer_info)
             LOG.info("paired clients=%s/%s", len(self.authorized), self.max_clients)
@@ -618,11 +643,736 @@ class VibeRemoteServer:
                         pass
                     self._drop(ws)
                     break
+        elif kind == "task_control":
+            await self._handle_task_control(websocket, msg)
+        elif kind == "get_usage":
+            # 手机端手动刷新 Codex 用量（立即重载并回发 usage 消息）
+            try:
+                changed = await asyncio.get_running_loop().run_in_executor(None, self.refresh_usage)
+            except Exception as e:
+                LOG.warning("get_usage refresh fail: %s", e)
+                changed = False
+            payload = {
+                "type": "tasks",
+                "tasks": sorted(self.tasks.values(),
+                                key=lambda t: -(self._effective_priority(t))),
+                "focusedTaskID": None,
+                "pendingRequests": self._pending_requests(),
+                "usage": self.usage_snapshot,
+            }
+            if changed:
+                self.broadcast(payload)   # 全量广播（含用量变化）
+            else:
+                await self._send_json(websocket, payload)
         elif kind == "voice_toggle":
             return None
         elif kind == "input_restore":
             # 手动恢复：切回默认（提示用户手动选择，避免误切其他设备）
             self._push_rec("如需恢复默认麦克风，请在 设置→系统→声音 中手动选择输入设备")
+
+    # ==================== AgentPager 风格 Hook 状态（方案 B）====================
+    #
+    # Hook 消息链路：
+    #   Claude/Codex (stdin JSON)
+    #     --> agent_hook.py --hook (TCP localhost:49361: {"hook_source":"claude|codex","payload":{...}})
+    #     --> self._handle_hook_client 接收
+    #     --> self._reduce_hook() 聚合为 TaskSnapshot dict
+    #     --> broadcast() 推到所有已授权手机（type: "tasks"）
+    #
+    # 手机决策链路（Approve/Deny/Interrupt/Retry）：
+    #   手机 WebSocket {"type":"task_control","task_id":...,"action":"approve|deny|..."}
+    #     --> self._handle_task_control()
+    #     --> TCP socket 回写到正在挂起的 agent hook（Claude/Codex stdout 决策）
+
+    def _reduce_hook(self, source: str, payload: dict) -> tuple[str, bool]:
+        """把单条 hook payload 合并到 tasks dict。
+        返回 (session_id, is_permission)。
+
+        字段别名兼容（AgentPager C# / 历史 hook 发送端混用 camelCase / snake_case）：
+          sessionId        <-> session_id          -> id
+          projectRoot      <-> cwd                 -> projectName
+          userPrompt       <-> prompt              -> title
+          toolName         <-> tool_name <-> toolType <-> tool_type
+          toolInput        <-> tool_input
+          permissionMode   <-> permission_mode
+          turnId           <-> turn_id
+          agentId          <-> agent_id
+          taskDescription  <-> task_description
+        """
+        def _get(d: dict, *names: str, default=None):
+            for n in names:
+                if n in d and d[n] is not None:
+                    return d[n]
+            return default
+
+        session_id = str(_get(payload, "session_id", "sessionId") or "").strip()
+        if not session_id:
+            return "", False
+        # 手机端已删除的任务不再通过 hook 事件复活
+        if session_id in self.deleted_tasks:
+            return "", False
+        now = int(time.time() * 1000)
+        event_name = str(payload.get("hook_event_name") or "")
+
+        # ---- 活动（activity）推断 ----
+        tool_name = str(_get(payload, "tool_name", "toolName", "tool_type", "toolType") or "").lower()
+        activity = None
+        if event_name in ("PreToolUse", "PostToolUse"):
+            if tool_name in ("runcommand", "exec", "execute", "bash"):
+                activity = "executing"
+            elif tool_name in ("search", "searchcodebase", "websearch", "webfetch"):
+                activity = "searching"
+            elif tool_name in ("read", "edit", "write", "deletefile", "grep", "glob", "ls"):
+                activity = "editing" if event_name == "PostToolUse" and ("edit" in tool_name or "write" in tool_name or "delete" in tool_name) else "reading"
+            elif tool_name in ("browser_use",):
+                activity = "browsing"
+            elif "agent" in tool_name or "sub" in tool_name:
+                activity = "delegating"
+            else:
+                activity = "thinking"
+
+        existing = self.tasks.get(session_id)
+        if existing is None:
+            existing = {
+                "id": session_id,
+                "source": source,   # "claude" | "codex"
+                "projectName": self._project_name_from(payload),
+                "title": "",
+                "userPrompt": None,
+                "latestStep": "",
+                "tokenUsage": None,
+                "subagents": [],
+                "lifecycle": "idle",
+                "activity": None,
+                "startedAt": now,
+                "updatedAt": now,
+                "completedAt": None,
+                "isUnread": True,
+                "isPinned": False,
+                "isMuted": False,
+                "capabilities": [],
+            }
+            self.tasks[session_id] = existing
+
+        # ---- 生命周期映射（AgentPager AgentLifecycle 对齐）----
+        ev = event_name
+        prev_lifecycle = existing["lifecycle"]
+        if ev == "SessionStart":
+            existing["lifecycle"] = "starting"
+            existing["startedAt"] = now
+            existing["capabilities"] = []
+            # SessionStart 一般直接带 userPrompt / projectName
+            up = str(_get(payload, "userPrompt", "prompt") or "")
+            if up and not existing.get("userPrompt"):
+                existing["userPrompt"] = up[:500]
+                existing["title"] = up[:80]
+        elif ev == "UserPromptSubmit":
+            existing["lifecycle"] = "running"
+            if not existing.get("userPrompt"):
+                up = str(_get(payload, "userPrompt", "prompt") or "")[:500]
+                existing["userPrompt"] = up
+                existing["title"] = up[:80]
+            existing["activity"] = "thinking"
+            existing["capabilities"] = ["interrupt"]
+        elif ev == "PreToolUse":
+            existing["lifecycle"] = "running"
+            existing["activity"] = activity or existing["activity"] or "thinking"
+            step = self._summarize_step(payload)
+            if step:
+                existing["latestStep"] = step
+            existing["capabilities"] = ["interrupt"]
+        elif ev == "PostToolUse":
+            existing["lifecycle"] = "running"
+            existing["activity"] = activity or existing["activity"] or "thinking"
+            existing["capabilities"] = ["interrupt"]
+        elif ev == "PermissionRequest":
+            pm = str(_get(payload, "permission_mode", "permissionMode") or "").lower()
+            existing["lifecycle"] = "waitingApproval" if "tool" in pm or "bash" in pm or "file" in pm else "waitingAnswer"
+            existing["activity"] = None
+            existing["capabilities"] = ["approve", "deny", "answer", "interrupt"]
+        elif ev == "PostToolUseFailure":
+            existing["lifecycle"] = "interrupted"
+            existing["completedAt"] = now
+            existing["activity"] = None
+            existing["capabilities"] = ["retry"]
+        elif ev == "PermissionDenied":
+            # Codex 权限被拒绝 → 该次运行终结（AgentPager 语义：Interrupted）
+            existing["lifecycle"] = "interrupted"
+            existing["completedAt"] = now
+            existing["activity"] = None
+            existing["capabilities"] = ["retry"]
+        elif ev == "Stop":
+            # Codex 会话/进程停止：曾被中断的保持 interrupted，其余视为正常完成（AgentPager 语义）
+            if existing["lifecycle"] != "interrupted":
+                existing["lifecycle"] = "succeeded"
+            existing["completedAt"] = now
+            existing["activity"] = None
+            existing["capabilities"] = ["retry"]
+        elif ev == "StopFailure":
+            # 停止失败：完成态回滚为运行（AgentPager 语义）
+            if existing["lifecycle"] == "succeeded":
+                existing["lifecycle"] = "running"
+                existing["completedAt"] = None
+            existing["capabilities"] = []
+        elif ev == "SessionEnd":
+            # 会话结束但任务未完成 → 离线（AgentPager 语义：IsTerminal ? 原状态 : Offline）
+            if existing["lifecycle"] not in ("succeeded", "interrupted"):
+                existing["lifecycle"] = "offline"
+                existing["completedAt"] = None
+            existing["activity"] = None
+            existing["capabilities"] = []
+        elif ev == "SubagentStart":
+            # Codex 子代理（子任务），合并到 subagents
+            sub_id = str(_get(payload, "agent_id", "agentId") or f"sub-{now}")
+            sub_name = str(_get(payload, "task_description", "taskDescription", "agent_type") or "子代理")[:60]
+            sub = {
+                "id": sub_id,
+                "path": _get(payload, "cwd") or "",
+                "displayName": sub_name,
+                "lifecycle": "running",
+                "activity": "delegating",
+                "latestStep": None,
+                "tokenUsage": None,
+                "startedAt": now,
+                "updatedAt": now,
+            }
+            existing.setdefault("subagents", [])
+            replaced = False
+            for i, s in enumerate(existing["subagents"]):
+                if s["id"] == sub_id:
+                    existing["subagents"][i] = sub
+                    replaced = True
+                    break
+            if not replaced:
+                existing["subagents"].append(sub)
+        elif ev == "SubagentStop":
+            sub_id = str(_get(payload, "agent_id", "agentId") or "")
+            for s in existing["subagents"]:
+                if s["id"] == sub_id:
+                    s["lifecycle"] = "succeeded"
+                    s["completedAt"] = now
+                    break
+        elif ev == "Notification":
+            ntype = str(_get(payload, "notification_type", "notificationType") or "").lower()
+            if ntype in ("idle_prompt", "elicitation_dialog", "agent_needs_input"):
+                # 等待用户输入的通知 → 等待回答（AgentPager IsAnswerNotification 语义）
+                existing["lifecycle"] = "waitingAnswer"
+                existing["activity"] = "thinking"
+                existing["completedAt"] = None
+                existing["capabilities"] = ["answer", "interrupt"]
+            else:
+                existing["latestStep"] = str(payload.get("message") or payload.get("title") or "")[:200] or existing["latestStep"]
+
+        # 任何有效事件都刷新时间戳
+        existing["updatedAt"] = now
+        lifecycle_changed = existing["lifecycle"] != prev_lifecycle
+        if lifecycle_changed and existing["lifecycle"] in ("succeeded", "interrupted"):
+            existing["isUnread"] = True
+
+        is_permission = event_name == "PermissionRequest"
+        return session_id, is_permission
+
+    @staticmethod
+    def _project_name_from(payload: dict) -> str:
+        def _get(d: dict, *names: str, default=None):
+            for n in names:
+                if n in d and d[n] is not None:
+                    return d[n]
+            return default
+        cwd = str(_get(payload, "cwd", "projectRoot") or "")
+        if not cwd:
+            return "Agent"
+        last = os.path.basename(os.path.normpath(cwd))
+        return last or "Agent"
+
+    @staticmethod
+    def _summarize_step(payload: dict) -> str:
+        def _get(d: dict, *names: str, default=None):
+            for n in names:
+                if n in d and d[n] is not None:
+                    return d[n]
+            return default
+        tn = str(_get(payload, "tool_name", "toolName", "tool_type", "toolType") or "")
+        ti = _get(payload, "tool_input", "toolInput")
+        if tn in ("Read", "Edit", "Write", "DeleteFile") and isinstance(ti, dict):
+            fp = str(ti.get("file_path") or "")
+            if fp:
+                return f"{tn} {os.path.basename(fp)}"
+        if tn in ("RunCommand", "runcommand", "bash", "exec") and isinstance(ti, dict):
+            cmd = str(ti.get("command") or "")[:80]
+            if cmd:
+                return f"$ {cmd}"
+        if tn == "Grep" and isinstance(ti, dict):
+            return f"grep {str(ti.get('pattern') or '')[:40]}"
+        if tn == "Glob":
+            return f"glob ..."
+        if tn == "WebSearch" and isinstance(ti, dict):
+            return f"search: {str(ti.get('query') or '')[:40]}"
+        if tn:
+            return tn
+        return ""
+
+    async def _handle_task_control(self, websocket, msg: dict) -> None:
+        """手机发送控制消息：approve/deny/interrupt/retry/markRead/pin/mute。
+        格式与 AgentPager ControlAction 对齐：
+          {"type":"task_control","task_id":"<session_id>","action":"approve|deny|answer|interrupt|retry","value":...}
+        """
+        task_id = str(msg.get("task_id") or "")
+        action = str(msg.get("action") or "").lower()
+        value = msg.get("value")
+        task = self.tasks.get(task_id)
+        if task is None:
+            return
+        if action in ("approve", "deny"):
+            # 通过 TCP 回写到挂起的 hook socket（Claude/Codex 正等 stdout 决策）
+            sock = self._pending_permission.get(task_id)
+            if sock is not None:
+                try:
+                    resp = self._encode_permission_response(task["source"], action)
+                    sock.sendall(resp)
+                except Exception as e:
+                    LOG.warning("hook permission response write fail: %s", e)
+                try:
+                    sock.close()
+                except Exception:
+                    pass
+                del self._pending_permission[task_id]
+                task["lifecycle"] = "running"
+                task["capabilities"] = ["interrupt"]
+        elif action == "answer":
+            # 手机端回答 agent 等待中的问题（waitingAnswer）：
+            # 记录答案文本，解除等待态让 agent 继续；若该等待仍挂着
+            # PermissionRequest 的 hook socket（非工具类权限），顺带放行。
+            text = str(value or "").strip()
+            if text:
+                task["answerText"] = text[:1000]
+                task["answeredAt"] = int(time.time() * 1000)
+            sock = self._pending_permission.get(task_id)
+            if sock is not None:
+                try:
+                    resp = self._encode_permission_response(task["source"], "approve")
+                    sock.sendall(resp)
+                except Exception as e:
+                    LOG.warning("hook answer response write fail: %s", e)
+                try:
+                    sock.close()
+                except Exception:
+                    pass
+                del self._pending_permission[task_id]
+            task["lifecycle"] = "running"
+            task["activity"] = "thinking"
+            task["completedAt"] = None
+            task.pop("pendingKind", None)
+            task["capabilities"] = ["interrupt"]
+            if text:
+                self._push_rec(f"已回复 {str(task.get('title') or task.get('projectName') or '')[:24]}：{text[:40]}")
+        elif action == "interrupt":
+            # 标记为中断（目前无法真正中断远端 agent，仅改 UI 状态）
+            task["lifecycle"] = "interrupted"
+            task["activity"] = None
+            task["completedAt"] = int(time.time() * 1000)
+            task["capabilities"] = ["retry"]
+        elif action == "retry":
+            task["lifecycle"] = "running"
+            task["completedAt"] = None
+            task["capabilities"] = ["interrupt"]
+        elif action == "markread":
+            task["isUnread"] = False
+        elif action == "pin":
+            task["isPinned"] = bool(value) if value is not None else not task.get("isPinned", False)
+        elif action == "mute":
+            task["isMuted"] = bool(value) if value is not None else not task.get("isMuted", False)
+        elif action == "delete":
+            # 手机端删除任务：先释放挂起的权限 socket（放行 agent 避免卡死），再移除任务
+            sock = self._pending_permission.pop(task_id, None)
+            if sock is not None:
+                try:
+                    sock.sendall(self._encode_permission_response(str(task.get("source") or "codex"), "approve"))
+                except Exception as e:
+                    LOG.warning("hook delete release write fail: %s", e)
+                try:
+                    sock.close()
+                except Exception:
+                    pass
+            del self.tasks[task_id]
+            # 防复活：该 session 之后到达的 hook / rollout 信号一律忽略
+            self.deleted_tasks.add(task_id)
+            while len(self.deleted_tasks) > 500:
+                self.deleted_tasks.pop()
+            self._push_rec(f"已删除任务 {str(task.get('title') or task.get('projectName') or task_id)[:24]}")
+
+        # 变更后立即广播
+        self.broadcast_tasks()
+
+    @staticmethod
+    def _encode_permission_response(source: str, decision: str) -> bytes:
+        """与 ClaudeHookOutput / CodexHookOutput 字节级对齐。"""
+        allow = decision == "approve"
+        if source == "claude":
+            obj = {
+                "continue": True,
+                "suppressOutput": True,
+                "hookSpecificOutput": {
+                    "hookEventName": "PermissionRequest",
+                    "decision": {"behavior": "allow" if allow else "deny"},
+                },
+            }
+        else:  # codex
+            obj = {
+                "continue": True,
+                "hookSpecificOutput": {
+                    "hookEventName": "PermissionRequest",
+                    "decision": "allow" if allow else "deny",
+                },
+            }
+        return (json.dumps(obj, ensure_ascii=False) + "\n").encode("utf-8")
+
+    def broadcast_tasks(self) -> None:
+        """把当前所有 task snapshot（按 AgentPager EffectivePriority 排序）+ 用量广播到所有已授权端。"""
+        tasks = sorted(
+            self.tasks.values(),
+            key=lambda t: -(self._effective_priority(t)),
+        )
+        self.broadcast({
+            "type": "tasks",
+            "tasks": tasks,
+            "focusedTaskID": None,
+            "pendingRequests": self._pending_requests(),
+            "usage": self.usage_snapshot,
+        })
+
+    @staticmethod
+    def _effective_priority(t: dict) -> int:
+        lifecycle = str(t.get("lifecycle") or "")
+        base = {
+            "waitingApproval": 600,
+            "waitingAnswer": 500,
+            "succeeded": 300,
+            "starting": 200,
+            "running": 200,
+            "thinking": 200,
+        }.get(lifecycle, 100)
+        bonus = 0
+        if bool(t.get("isUnread")) and lifecycle == "succeeded":
+            bonus += 50
+        if bool(t.get("isPinned")):
+            bonus += 25
+        return base + bonus
+
+    def _pending_requests(self) -> list:
+        out = []
+        for sid, task in self.tasks.items():
+            lc = str(task.get("lifecycle") or "")
+            if lc in ("waitingApproval", "waitingAnswer"):
+                kind = "approval" if lc == "waitingApproval" else "question"
+                out.append({
+                    "taskID": sid,
+                    "kind": kind,
+                    "summary": task.get("latestStep") or task.get("title") or "",
+                    "options": ["Approve", "Deny"] if kind == "approval" else [],
+                })
+        return out
+
+    # ==================== Codex rollout 观察（细粒度状态） ====================
+    #
+    # Hook 只能提供离散事件（SessionStart/PreToolUse/…），思考/执行/token/子代理等
+    # 细粒度状态来自 ~/.codex/sessions/**/*.jsonl 的增量解析（与 AgentPager
+    # CodexRolloutObserver 对齐），由 _rollout_tick 周期拉取并合并进 tasks。
+
+    @staticmethod
+    def _new_codex_task(session_id: str, cwd: str, now: int) -> dict:
+        return {
+            "id": session_id,
+            "source": "codex",
+            "projectName": os.path.basename(os.path.normpath(cwd)) if cwd else "Agent",
+            "title": "",
+            "userPrompt": None,
+            "latestStep": "",
+            "tokenUsage": None,
+            "subagents": [],
+            "lifecycle": "starting",
+            "activity": None,
+            "startedAt": now,
+            "updatedAt": now,
+            "completedAt": None,
+            "isUnread": True,
+            "isPinned": False,
+            "isMuted": False,
+            "capabilities": [],
+        }
+
+    def _apply_rollout_signals(self, signals: list[RolloutSignal]) -> bool:
+        """把 rollout 信号合并进任务/子代理，返回是否有显著变化。"""
+        changed = False
+        for sig in signals:
+            # 手机端已删除的 session 不再通过 rollout 信号复活
+            if sig.session_id in self.deleted_tasks:
+                continue
+            now = sig.timestamp or int(time.time() * 1000)
+            task = self.tasks.get(sig.session_id)
+            if task is None:
+                task = self._new_codex_task(sig.session_id, sig.cwd, now)
+                self.tasks[sig.session_id] = task
+                changed = True
+            if sig.subagent_id:
+                changed = self._apply_subagent_signal(task, sig, now) or changed
+                continue
+            if sig.user_prompt and not task.get("userPrompt"):
+                task["userPrompt"] = sig.user_prompt[:500]
+                task["title"] = sig.user_prompt[:80]
+                changed = True
+            if sig.latest_step:
+                task["latestStep"] = sig.latest_step
+                changed = True  # 最新步骤高频变化需实时同步
+            if sig.summary and sig.request_kind is not None:
+                # 等待批准/回答的摘要文案放 latestStep，使列表一眼可见
+                task["latestStep"] = sig.summary
+                changed = True
+            prev_lc = task.get("lifecycle")
+            if sig.lifecycle is not None and sig.lifecycle != prev_lc:
+                task["lifecycle"] = sig.lifecycle
+                if sig.lifecycle in ("succeeded", "interrupted"):
+                    task["completedAt"] = now
+                    task["isUnread"] = True
+                elif sig.lifecycle in ("running", "starting"):
+                    task["completedAt"] = None
+                if sig.lifecycle in ("waitingApproval", "waitingAnswer"):
+                    task["capabilities"] = (["approve", "deny", "answer", "interrupt"]
+                                            if sig.request_kind == "approval"
+                                            else ["answer", "interrupt"])
+                    task["pendingKind"] = sig.request_kind
+                elif sig.lifecycle == "running":
+                    task["capabilities"] = ["interrupt"]
+                elif sig.lifecycle in ("succeeded", "interrupted", "offline"):
+                    task["capabilities"] = (["retry"] if sig.lifecycle != "offline" else [])
+                    if sig.request_kind == "question":
+                        task["latestStep"] = sig.summary or task.get("latestStep")
+                if sig.lifecycle not in ("waitingApproval", "waitingAnswer"):
+                    task.pop("pendingKind", None)
+                changed = True
+            if sig.activity is not None and sig.activity != task.get("activity"):
+                task["activity"] = sig.activity
+                changed = True
+            if sig.usage is not None:
+                task["tokenUsage"] = sig.usage
+                changed = True
+            task["updatedAt"] = now
+            # waitingApproval/Answer 时需要让手机端 pendingRequests 感知到
+            if (task.get("lifecycle") in ("waitingApproval", "waitingAnswer")
+                    and task.get("pendingKind") is None):
+                task["pendingKind"] = sig.request_kind
+        return changed
+
+    @staticmethod
+    def _apply_subagent_signal(task: dict, sig: RolloutSignal, now: int) -> bool:
+        subs = task.setdefault("subagents", [])
+        sub = next((s for s in subs if s["id"] == sig.subagent_id), None)
+        if sub is None:
+            path = sig.subagent_path or ""
+            sub = {
+                "id": sig.subagent_id,
+                "path": path,
+                "displayName": CodexRolloutObserver.subagent_name_from_path(path),
+                "lifecycle": "running",
+                "activity": "thinking",
+                "latestStep": None,
+                "tokenUsage": None,
+                "startedAt": now,
+                "updatedAt": now,
+                "completedAt": None,
+            }
+            subs.append(sub)
+        changed = False
+        if sig.lifecycle is not None and sig.lifecycle != sub.get("lifecycle"):
+            sub["lifecycle"] = sig.lifecycle
+            if sig.lifecycle in ("succeeded", "interrupted"):
+                sub["completedAt"] = now
+            changed = True
+        if sig.activity is not None and sig.activity != sub.get("activity"):
+            sub["activity"] = sig.activity
+            changed = True
+        if sig.latest_step:
+            sub["latestStep"] = sig.latest_step
+            changed = True
+        if sig.usage is not None:
+            sub["tokenUsage"] = sig.usage
+            changed = True
+        sub["updatedAt"] = now
+        return changed
+
+    def refresh_usage(self) -> bool:
+        """重载 Codex 用量快照，返回是否有变化。"""
+        if self._usage_loading:
+            return False
+        self._usage_loading = True
+        try:
+            snap = self.usage_loader.load()
+            changed = json.dumps(snap, ensure_ascii=False, sort_keys=True) != json.dumps(
+                self.usage_snapshot, ensure_ascii=False, sort_keys=True) if snap else bool(self.usage_snapshot)
+            self.usage_snapshot = snap
+            return changed
+        except Exception as e:
+            LOG.warning("codex usage load fail: %s", e)
+            return False
+        finally:
+            self._usage_loading = False
+
+    async def _rollout_tick(self) -> None:
+        """每秒拉取 rollout 增量信号，变化时广播。"""
+        while True:
+            try:
+                await asyncio.sleep(1.0)
+                signals = self.rollout.observe()
+                if signals and self._apply_rollout_signals(signals):
+                    self.broadcast_tasks()
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                LOG.warning("rollout tick fail: %s", e)
+
+    async def _usage_tick(self) -> None:
+        """初始延迟后刷新用量，之后每 120 秒刷新一次；手机可随时 get_usage。"""
+        await asyncio.sleep(8.0)
+        while True:
+            try:
+                if self.refresh_usage():
+                    self.broadcast_tasks()
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                LOG.warning("usage tick fail: %s", e)
+            await asyncio.sleep(120.0)
+
+    # ---- Hook TCP server（asyncio streams，替换 AgentPager HookTcpServer C#）----
+    async def _hook_tcp_handler(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        sock: socket.socket | None = None
+        try:
+            sock = writer.get_extra_info("socket")
+            # 第一行是 hook 信封 JSON：{"hook_source":"...","payload":{...}}
+            try:
+                line_bytes = await asyncio.wait_for(reader.readline(), timeout=5.0)
+            except asyncio.TimeoutError:
+                writer.close()
+                await writer.wait_closed()
+                return
+            if not line_bytes:
+                writer.close()
+                await writer.wait_closed()
+                return
+            text = line_bytes.decode("utf-8", errors="replace").strip()
+            if not text:
+                writer.close()
+                await writer.wait_closed()
+                return
+            try:
+                envelope = json.loads(text)
+                source = str(envelope.get("hook_source") or "").lower()
+                payload = envelope.get("payload") or {}
+            except Exception:
+                # 回退兼容：直接作为 codex payload 处理（AgentPager HookTcpServer.TryDecodeCodex）
+                try:
+                    payload = json.loads(text)
+                    source = "codex" if payload.get("turn_id") else "claude"
+                except Exception:
+                    writer.close()
+                    await writer.wait_closed()
+                    return
+            if source not in ("claude", "codex") or not isinstance(payload, dict):
+                writer.close()
+                await writer.wait_closed()
+                return
+
+            session_id, is_permission = self._reduce_hook(source, payload)
+            if source == "codex":
+                # 顺带跟踪 codex rollout 文件（细粒度状态来源）
+                self.rollout.include(payload)
+            if not session_id:
+                if not is_permission:
+                    writer.write(b"\n")
+                    await writer.drain()
+                writer.close()
+                await writer.wait_closed()
+                return
+
+            # ---- 权限事件：挂起（直到 task_control approve/deny 或超时）----
+            if is_permission and sock is not None:
+                # 踢掉旧的同 session 的 pending socket（避免泄露）
+                old = self._pending_permission.pop(session_id, None)
+                if old:
+                    try:
+                        old.close()
+                    except Exception:
+                        pass
+                # 用同步 socket 存储（task_control 在 event loop 里需要同步 write）
+                # 注意：asyncio StreamWriter sock 是同一个，可用 raw fileno 做同步 socket
+                try:
+                    dup = socket.fromfd(sock.fileno(), sock.family, sock.type, sock.proto)
+                    self._pending_permission[session_id] = dup
+                except Exception as e:
+                    LOG.warning("hook socket dup fail: %s", e)
+                # 广播 tasks（此时会显示待确认按钮）
+                self.loop.call_soon_threadsafe(self.broadcast_tasks)
+                # 等待手机端审批（审批会通过 task_control 把 decision 写进这个挂起的 socket）
+                # 本协程只要等审批完成信号即可（写进 socket 即视为 OK）；
+                # 我们用 ping 方式简单等待：直到 task 不再 waitingApproval，或超时
+                deadline = time.time() + 86400.0
+                try:
+                    while time.time() < deadline:
+                        await asyncio.sleep(0.5)
+                        cur = self.tasks.get(session_id)
+                        if cur is None:
+                            break
+                        if str(cur.get("lifecycle") or "") not in ("waitingApproval", "waitingAnswer"):
+                            break
+                except asyncio.CancelledError:
+                    pass
+                finally:
+                    sock0 = self._pending_permission.pop(session_id, None)
+                    if sock0:
+                        try:
+                            sock0.close()
+                        except Exception:
+                            pass
+                try:
+                    writer.close()
+                    await writer.wait_closed()
+                except Exception:
+                    pass
+                return
+
+            # ---- 非权限事件：立即 ack（\n）然后广播 ----
+            self.loop.call_soon_threadsafe(self.broadcast_tasks)
+            writer.write(b"\n")
+            try:
+                await writer.drain()
+            except Exception:
+                pass
+        except ConnectionResetError:
+            pass
+        except Exception as e:
+            LOG.warning("hook tcp handler error: %s", e)
+        finally:
+            try:
+                writer.close()
+                await writer.wait_closed()
+            except Exception:
+                pass
+
+    async def _start_hook_tcp_server(self) -> None:
+        try:
+            self._hook_tcp_server = await asyncio.start_server(
+                self._hook_tcp_handler,
+                host="127.0.0.1",
+                port=self.hook_port,
+                reuse_address=True,
+                start_serving=True,
+            )
+            LOG.info("Hook TCP server listening on 127.0.0.1:%d", self.hook_port)
+            self._push_rec(f"Hook 服务：127.0.0.1:{self.hook_port}（Claude/Codex hook 就绪）")
+        except OSError as e:
+            LOG.warning("Hook TCP port %s in use, hook disabled: %s", self.hook_port, e)
+            self._push_rec(f"Hook 端口 {self.hook_port} 被占用，Hook 状态聚合已禁用")
+            self._hook_tcp_server = None
 
     async def _set_keymap(self, websocket, msg: dict) -> None:
         key_id = str(msg.get("key_id") or "")
@@ -748,6 +1498,12 @@ class VibeRemoteServer:
 
         self.pairing_info()
 
+        # 启动 Hook TCP server（AgentPager 方案 B：聚合 agent 状态）
+        await self._start_hook_tcp_server()
+        # Codex rollout 细粒度状态观察 + 用量定时刷新（AgentPager 对齐）
+        self._rollout_task = asyncio.create_task(self._rollout_tick())
+        self._usage_task = asyncio.create_task(self._usage_tick())
+
         async with ws_serve(
             self.handle_ws,
             self.host,
@@ -759,8 +1515,10 @@ class VibeRemoteServer:
                 "=" * 56,
                 "  Vibe Remote desktop server is running",
                 f"  Pair console : http://localhost:{self.port}/pair/console",
-                f"  Admin panel  : http://localhost:{self.port}/",
-                "  Local IPs (WiFi / Hotspot / USB-tether all reachable):",
+                f"  Hook TCP (Claude/Codex) : 127.0.0.1:{self.hook_port}",
+                "  Hook install : vibe_agent_hook --install both",
+                "  Hook uninstall: vibe_agent_hook --uninstall both",
+                "  Local IPs (WiFi / USB-tether reachable):",
             ]
             for ip in all_local_ips():
                 banner_lines.append(f"    http://{ip}:{self.port}/")

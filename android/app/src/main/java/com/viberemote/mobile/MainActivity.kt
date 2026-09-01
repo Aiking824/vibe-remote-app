@@ -7,6 +7,7 @@ import android.content.ContextWrapper
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Bundle
+import android.view.WindowManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
@@ -213,6 +214,14 @@ private fun AppContent(
         doConnect(client, pairUrl)
     }
 
+    // Agent 页屏幕亮度策略：焦点任务激活时调亮；null 恢复系统亮度
+    fun applyAgentBrightness(value: Float?) {
+        val a = activity ?: return
+        val lp = a.window.attributes
+        lp.screenBrightness = value ?: WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_NONE
+        a.window.attributes = lp
+    }
+
     Box(Modifier.fillMaxSize()) {
         RemoteScreen(
             client = client,
@@ -221,6 +230,7 @@ private fun AppContent(
             onConnect = { onConnectClick() },
             onScanQr = { onScanClick() },
             onNeedsMic = { ensureMic() },
+            onAgentBrightness = { applyAgentBrightness(it) },
         )
 
         // 配对确认码弹窗

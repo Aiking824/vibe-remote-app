@@ -54,6 +54,12 @@ class RemoteClient(
     val lastVoice = MutableStateFlow("")
     val logs = MutableStateFlow<List<Pair<Long, String>>>(emptyList())
 
+    // ---- AgentPager 风格任务快照（方案 B Hook 聚合）----
+    val tasks = MutableStateFlow<List<TaskSnapshot>>(emptyList())
+    val focusedTaskID = MutableStateFlow<String?>(null)
+    val pendingRequests = MutableStateFlow<List<PendingRequest>>(emptyList())
+    val usage = MutableStateFlow<UsageSnapshot?>(null)
+
     private fun pushLog(text: String) {
         val now = System.currentTimeMillis()
         val cur = logs.value.toMutableList()
@@ -184,6 +190,21 @@ class RemoteClient(
         sendJson(JSONObject().put("type", "disconnect_peer").put("id", id))
     }
 
+    /** 发送 AgentPager 风格控制消息（approve/deny/interrupt/retry/markRead/pin/mute）。 */
+    fun taskControl(taskID: String, action: String, value: String? = null) {
+        val obj = JSONObject()
+            .put("type", "task_control")
+            .put("task_id", taskID)
+            .put("action", action)
+        if (value != null) obj.put("value", value)
+        sendJson(obj)
+    }
+
+    /** 手动刷新 Codex 用量（服务端立即重载并回发 usage） */
+    fun getUsage() {
+        sendJson(JSONObject().put("type", "get_usage"))
+    }
+
     /** 语音 PCM16（16kHz 单声道）分块上行 */
     fun feedPcm(chunk: ByteArray) {
         val s = ws ?: return
@@ -310,6 +331,32 @@ class RemoteClient(
             "log" -> {
                 pushLog(m.optString("text"))
                 onEvent(WsEvent.Log(m.optString("text")))
+            }
+            "tasks" -> {
+                // AgentPager 风格：tasks 快照（与 WireModels.StateSnapshotPayload 对齐）
+                val arr = m.optJSONArray("tasks")
+                val list = mutableListOf<TaskSnapshot>()
+                if (arr != null) {
+                    for (i in 0 until arr.length()) {
+                        val o = arr.optJSONObject(i) ?: continue
+                        list += TaskSnapshot.fromJson(o)
+                    }
+                }
+                tasks.value = list
+                val fid = m.optString("focusedTaskID", "").ifBlank { null }
+                focusedTaskID.value = fid
+                val reqArr = m.optJSONArray("pendingRequests")
+                val reqs = mutableListOf<PendingRequest>()
+                if (reqArr != null) {
+                    for (i in 0 until reqArr.length()) {
+                        val o = reqArr.optJSONObject(i) ?: continue
+                        reqs += PendingRequest.fromJson(o)
+                    }
+                }
+                pendingRequests.value = reqs
+                val u = m.optJSONObject("usage")
+                usage.value = u?.let { UsageSnapshot.fromJson(it) } ?: usage.value
+                onEvent(WsEvent.TasksSnapshot(list, fid, reqs))
             }
         }
     }
