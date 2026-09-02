@@ -363,6 +363,76 @@ private fun HistoryPanel(
     }
 }
 
+/**
+ * 精简用量图：只保留「时间段选择 + 右半柱状图」（不含左部额度面板）。
+ * 用于首界面 Agent 页纵览（竖屏 Overview）的近期用量区块。
+ */
+@Composable
+fun UsageBarsOnlyPanel(
+    usage: UsageSnapshot?,
+    modifier: Modifier = Modifier,
+) {
+    var selectedRange by remember { mutableStateOf(UsageRange.SEVEN_DAYS) }
+    val allPoints = usage?.dailyUsage.orEmpty()
+    val visiblePoints = remember(allPoints, selectedRange) {
+        UsagePresentation.pointsForRange(allPoints, selectedRange)
+    }
+    val totalTokens = remember(visiblePoints) {
+        UsagePresentation.totalTokens(visiblePoints)
+    }
+
+    Column(
+        modifier = modifier
+            .padding(horizontal = 10.dp, vertical = 10.dp),
+        verticalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        // 顶：标题 + 合计 Tokens + 时间段选择器
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween,
+        ) {
+            Column(verticalArrangement = Arrangement.spacedBy(1.dp)) {
+                Text(
+                    "近期用量 · ${selectedRange.label}",
+                    color = AgColors.Text,
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.Bold,
+                )
+                Text(
+                    "合计 ${UsagePresentation.compactTokens(totalTokens)} tokens",
+                    color = AgColors.Muted,
+                    fontSize = 9.sp,
+                )
+            }
+            UsageRangeSelector(
+                selectedRange = selectedRange,
+                onRangeSelected = { selectedRange = it },
+            )
+        }
+
+        // 柱状图（简化高度 110dp，不包含左部额度面板的 PixelCore/进度条/重置文案）
+        AnimatedContent(
+            targetState = selectedRange,
+            transitionSpec = {
+                (
+                    fadeIn(animationSpec = tween(150)) togetherWith
+                        fadeOut(animationSpec = tween(100))
+                    ).using(SizeTransform(clip = false))
+            },
+            label = "纵览用量柱状图切换",
+        ) {
+            val rangePoints = UsagePresentation.pointsForRange(allPoints, it)
+            UsageBars(
+                points = rangePoints,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(110.dp),
+            )
+        }
+    }
+}
+
 @Composable
 private fun UsageRangeSelector(
     selectedRange: UsageRange,

@@ -119,11 +119,16 @@ import com.viberemote.mobile.net.TaskSnapshot as NetTaskSnapshot
 import com.viberemote.mobile.net.TokenUsage
 import com.viberemote.mobile.AgentGridUiState
 import com.viberemote.mobile.ScreenBrightnessPolicy
+import com.viberemote.mobile.domain.AgentActivity
+import com.viberemote.mobile.domain.AgentLifecycle
+import com.viberemote.mobile.domain.AgentSource
 import com.viberemote.mobile.domain.ControlAction
 import com.viberemote.mobile.domain.LinkState
 import com.viberemote.mobile.domain.StateSnapshotPayload
 import com.viberemote.mobile.domain.TaskDashboardProjection
 import com.viberemote.mobile.domain.TaskDashboardProjector
+import com.viberemote.mobile.domain.TaskSnapshot
+import com.viberemote.mobile.domain.UsageSnapshot
 import com.viberemote.mobile.domain.toDomain
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -175,28 +180,32 @@ fun VibeColors(): androidx.compose.material3.ColorScheme {
 private fun sourceMark(source: String): Pair<String, Color> = when (source.lowercase()) {
     "claude" -> "C" to Color(0xFFD97757)
     "codex" -> "X" to Color(0xFF6E56CF)
-    "trae" -> "T" to AgColors.Amber
-    "deepseek" -> "D" to AgColors.Blue
-    "trae solo cn", "solo" -> "S" to AgColors.Violet
     else -> "?" to AgColors.Muted
 }
 
 // -- 状态 → 中文/颜色（AgentPager 状态色） --
-private fun stateCnOf(s: String) = when (s) {
-    "READY" -> "空闲"
-    "WORKING", "RUNNING" -> "工作中"
+// 注意：服务端可能传 "running"/"starting"（AgentPager 对齐的小写）或 "RUNNING"/"STARTING"，两种都要命中
+private fun stateCnOf(s: String): String = when (s.uppercase()) {
+    "READY", "IDLE" -> "空闲"
+    "WORKING", "RUNNING", "STARTING" -> "工作中"
     "THINKING" -> "思考中"
-    "CONFIRM", "WAITING" -> "待确认"
+    "CONFIRM", "WAITING", "WAITINGAPPROVAL", "WAITINGANSWER",
+    "WAITING_APPROVAL", "WAITING_ANSWER" -> "待确认"
     "ERROR", "FAILED" -> "出错"
+    "SUCCEEDED", "SUCCESS" -> "已完成"
+    "INTERRUPTED" -> "已中断"
+    "OFFLINE" -> "离线"
     else -> s
 }
 
-private fun stateColorOf(s: String) = when (s) {
-    "READY" -> AgColors.Green
-    "WORKING", "RUNNING" -> AgColors.Amber
-    "THINKING" -> AgColors.Cyan
-    "CONFIRM", "WAITING" -> AgColors.Blue
-    "ERROR", "FAILED" -> AgColors.Red
+private fun stateColorOf(s: String) = when (s.uppercase()) {
+    "READY", "IDLE" -> AgColors.Green
+    "WORKING", "RUNNING", "STARTING", "THINKING" -> AgColors.Amber
+    "CONFIRM", "WAITING", "WAITINGAPPROVAL", "WAITINGANSWER",
+    "WAITING_APPROVAL", "WAITING_ANSWER" -> AgColors.Blue
+    "ERROR", "FAILED", "INTERRUPTED" -> AgColors.Red
+    "SUCCEEDED", "SUCCESS" -> AgColors.Green
+    "OFFLINE" -> AgColors.Muted
     else -> AgColors.Muted
 }
 
@@ -1261,6 +1270,8 @@ private fun AgentPage(
     val pendingRequests by client.pendingRequests.collectAsState()
     val usage by client.usage.collectAsState()
     val paired by client.paired.collectAsState()
+    val orientation = LocalConfiguration.current.orientation
+    val landscape = orientation == Configuration.ORIENTATION_LANDSCAPE
 
     // 进入 Agent 页即向桌面端请求一次用量刷新
     LaunchedEffect(Unit) { client.getUsage() }
@@ -1321,30 +1332,396 @@ private fun AgentPage(
         onDispose { onAgentBrightness(null) }
     }
 
-    AgentGridScreen(
-        state = state,
-        onControl = { id, action, value ->
-            client.taskControl(id, action.toWire(), value)
-        },
-        onFocus = { id ->
-            projection = projection.focusing(id)
-        },
-        onToggleDashboard = {
-            projection = projection.togglingDashboard()
-        },
-        onActiveTaskBrightnessChange = { value ->
-            activeTaskBrightness = ScreenBrightnessPolicy.sanitizeActiveBrightness(value)
-        },
-    )
+    // 横屏：全量 AgentGridScreen（任务列表 / 详情 / 用量切换 / 设置 全保留）
+    // 竖屏：只保留「近期用量仪表盘 + 活跃项目摘要卡」，不做任务详情/设置
+    if (landscape) {
+        AgentGridScreen(
+            state = state,
+            onControl = { id, action, value ->
+                client.taskControl(id, action.toWire(), value)
+            },
+            onFocus = { id ->
+                projection = projection.focusing(id)
+            },
+            onToggleDashboard = {
+                projection = projection.togglingDashboard()
+            },
+            onActiveTaskBrightnessChange = { value ->
+                activeTaskBrightness = ScreenBrightnessPolicy.sanitizeActiveBrightness(value)
+            },
+        )
+    } else {
+        AgentPortraitOverview(
+            tasks = snapshot.tasks,
+            usage = snapshot.usage,
+            connected = state.linkState == LinkState.CONNECTED,
+        )
+    }
 }
 
-/** Agent 状态卡（用户可选项目 + 高亮 + 选中项目下的当前运行状态 + 点击弹 Token 明细）
+/**
+ * 竖屏 Agent 主界面（仅两部分，全部可在一屏内看完无需滚动）：
+ *   1. 近期用量仪表盘（UsageDashboard，复用 AgentPager 移植版）
+ *   2. 现在活跃的项目（按项目名分组，每个项目取最活跃任务 → 摘要卡）
  *
- *  交互流程：
- *    1. 点击卡片 → 先弹出项目选择器（全部项目分组 + "自动（最活跃）"项，当前选中项琥珀色高亮）
- *    2. 选中某个项目 → 卡片只显示该项目下最活跃任务的运行状态、Harness 名、Token 明细
- *    3. 在选择器里选"查看选中项目 Tokens" → 跳到选中项目的 Token 明细对话框
- *    4. "清空选择"按钮 = 恢复自动模式（跨 Tab 共享选中项）
+ *   不显示设置页 / 任务详情 / 删除按钮 —— 那些操作统一走横屏或其它 Tab。
+ */
+@Composable
+private fun AgentPortraitOverview(
+    tasks: List<TaskSnapshot>,
+    usage: UsageSnapshot?,
+    connected: Boolean,
+) {
+    val u = ui()
+
+    // 活跃 = 非终态（STARTING / RUNNING / WAITING_*；isTerminal 为 TaskSnapshot 自定义属性）
+    val activeTasks = remember(tasks) { tasks.filter { !it.isTerminal } }
+
+    // 按项目名分组，每组按 attentionPriority / updatedAt 取代表
+    val activeProjectRows = remember(activeTasks) {
+        activeTasks
+            .groupBy { it.projectName.ifBlank { "(未命名项目)" } }
+            .mapValues { (_, list) ->
+                list.maxWithOrNull(
+                    compareBy<TaskSnapshot> { it.attentionPriority }
+                        .thenByDescending { it.updatedAt }
+                )!!
+            }
+            .entries
+            .sortedWith(
+                compareByDescending<Map.Entry<String, TaskSnapshot>> {
+                    when (it.value.lifecycle) {
+                        AgentLifecycle.WAITING_APPROVAL,
+                        AgentLifecycle.WAITING_ANSWER,
+                        -> 4
+                        AgentLifecycle.RUNNING -> 3
+                        AgentLifecycle.STARTING -> 2
+                        AgentLifecycle.OFFLINE -> 1
+                        else -> 0
+                    }
+                }
+                    .thenByDescending { it.value.updatedAt }
+            )
+    }
+
+    Column(
+        Modifier
+            .fillMaxSize()
+            .background(u.bg)
+            .verticalScroll(rememberScrollState())
+            .padding(horizontal = 12.dp, vertical = 10.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+        // —— 标题行 ——
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                "Agent · 纵览",
+                color = u.fg, fontFamily = PixelFont,
+                fontSize = 15.sp, fontWeight = FontWeight.Bold,
+            )
+            Spacer(Modifier.weight(1f))
+            val dot = if (connected) AgColors.Green else AgColors.Amber
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Box(Modifier.size(5.dp).clip(CircleShape).background(dot))
+                Spacer(Modifier.width(4.dp))
+                Text(
+                    if (connected) "已连接电脑" else "未连接（显示缓存）",
+                    color = dot, fontSize = 10.sp,
+                )
+            }
+        }
+
+        // —— 1. 近期用量（只保留右半柱状图：左部额度面板已被精简） ——
+        Box(
+            Modifier
+                .fillMaxWidth()
+                .background(AgentGridColors.Background)
+                .border(1.dp, u.border)
+        ) {
+            UsageBarsOnlyPanel(usage = usage)
+        }
+
+        // —— 2. 现在活跃的项目 ——
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                "活跃项目",
+                color = u.fg, fontSize = 12.sp, fontWeight = FontWeight.SemiBold,
+            )
+            Spacer(Modifier.width(4.dp))
+            Text(
+                "共 ${activeProjectRows.size} 个项目 · ${activeTasks.size} 个任务",
+                color = u.sub, fontSize = 10.sp,
+            )
+        }
+
+        if (activeProjectRows.isEmpty()) {
+            Column(
+                Modifier
+                    .fillMaxWidth()
+                    .background(u.panel)
+                    .border(1.dp, u.border)
+                    .padding(16.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+            ) {
+                Text("（当前没有活跃项目）", color = u.sub, fontSize = 12.sp)
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    "Hook 未启动 / 所有任务已完成，横屏可查看历史",
+                    color = u.sub, fontSize = 10.sp,
+                )
+            }
+        } else {
+            activeProjectRows.forEach { (project, leadTask) ->
+                ActiveProjectCard(
+                    project = project,
+                    lead = leadTask,
+                    sameProjectTaskCount = activeTasks.count {
+                        (it.projectName.ifBlank { "(未命名项目)" }) == project
+                    },
+                )
+            }
+        }
+    }
+}
+
+/** 单条「活跃项目」摘要卡（竖屏 Agent Overview 专用）
+ *
+ *  本次完善：明确显示运行状态
+ *    • 顶部彩色状态条（lifecycle → 颜色）— 整个卡片顶部 2dp 指示条
+ *    • lifecycle 中文 + 秒级运行耗时（"运行中 · 1分 23秒"）
+ *    • 当前 activity 中文动作标签（"正在编辑"、"正在执行命令"…）
+ *    • 底部「进度条」：按 attentionPriority 归一化的 0~1 视觉进度（活跃程度指示）
+ *    • 最终状态条颜色：WAITING_APPROVAL 红闪底 / RUNNING 绿流 / STARTING 蓝 / WAITING_ANSWER 紫 / SUCCEEDED 琥珀底
+ * */
+@Composable
+private fun ActiveProjectCard(
+    project: String,
+    lead: TaskSnapshot,
+    sameProjectTaskCount: Int,
+) {
+    val u = ui()
+    val stateColor = stateColorOf(lead.lifecycle.wireName())
+    val stateCn = stateCnOf(lead.lifecycle.wireName())
+    val (mark, markColor) = sourceMark(
+        when (lead.source) {
+            AgentSource.CLAUDE_CODE -> "claude"
+            AgentSource.CODEX_DESKTOP, AgentSource.CODEX_CLI -> "codex"
+        }
+    )
+    val waiting = lead.lifecycle == AgentLifecycle.WAITING_APPROVAL ||
+        lead.lifecycle == AgentLifecycle.WAITING_ANSWER
+    val urgent = waiting || lead.attentionPriority >= 250
+
+    // 运行耗时（秒级实时刷新 —— 每 1s 重新计算 elapsedAt）
+    var tick by remember { mutableStateOf(System.currentTimeMillis()) }
+    LaunchedEffect(Unit) {
+        while (true) {
+            delay(1000L)
+            tick = System.currentTimeMillis()
+        }
+    }
+    val elapsed = remember(tick, lead) {
+        val ms = if (lead.isTerminal && lead.completedAt != null) {
+            lead.completedAt - lead.startedAt
+        } else {
+            tick - lead.startedAt
+        }.coerceAtLeast(0L)
+        formatElapsedMs(ms)
+    }
+
+    // 当前 Activity 文字（非运行态为空）
+    val activityText = activityCnOf(lead.activity)
+
+    // 进度条归一化（attentionPriority 0..600+ → 0..1，阈值 250 封顶，避免 WAITING 顶满时 RUNNING 也不显
+    val progress = remember(lead.attentionPriority) {
+        (lead.attentionPriority.coerceAtMost(600) / 600f).coerceIn(0f, 1f)
+    }
+
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .clip(RectangleShape)
+            .background(
+                if (urgent) AgColors.Amber.copy(alpha = 0.05f) else u.panel,
+            )
+            .border(1.dp, if (urgent) AgColors.Amber.copy(alpha = 0.6f) else u.border),
+    ) {
+        // —— 顶部 2dp 彩色状态条（用户"项目运行状态条"要求） ——
+        Box(Modifier.fillMaxWidth().height(2.dp).background(stateColor))
+
+        Column(Modifier.padding(10.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Box(
+                    Modifier
+                        .size(30.dp)
+                        .background(markColor.copy(alpha = 0.16f))
+                        .border(1.dp, markColor.copy(alpha = 0.5f)),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text(mark, color = markColor, fontSize = 14.sp, fontWeight = FontWeight.Black)
+                }
+                Spacer(Modifier.width(10.dp))
+                Column(Modifier.weight(1f)) {
+                    // 第一行：Harness名 / +N徽章 / 状态胶囊
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            text = harnessDisplayName(
+                            when (lead.source) {
+                                AgentSource.CLAUDE_CODE -> "claude"
+                                AgentSource.CODEX_DESKTOP, AgentSource.CODEX_CLI -> "codex"
+                            }
+                        ),
+                            color = u.fg, fontSize = 11.sp, fontWeight = FontWeight.SemiBold,
+                            maxLines = 1, overflow = TextOverflow.Ellipsis,
+                        )
+                        if (sameProjectTaskCount > 1) {
+                            Spacer(Modifier.width(4.dp))
+                            Box(Modifier.background(u.panel2).padding(horizontal = 3.dp, vertical = 0.dp)) {
+                                Text(
+                                    "+${sameProjectTaskCount - 1}",
+                                    color = u.sub, fontSize = 9.sp,
+                                )
+                            }
+                        }
+                        Spacer(Modifier.weight(1f))
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier
+                                .background(stateColor.copy(alpha = 0.14f))
+                                .padding(horizontal = 5.dp, vertical = 1.dp),
+                        ) {
+                            Box(Modifier.size(4.dp).clip(CircleShape).background(stateColor))
+                            Spacer(Modifier.width(3.dp))
+                            Text(stateCn, color = stateColor, fontSize = 9.sp, fontWeight = FontWeight.SemiBold)
+                        }
+                    }
+                    Spacer(Modifier.height(1.dp))
+                    // 第二行：项目名（琥珀粗体高亮）
+                    Text(
+                        project,
+                        color = AgColors.Amber, fontSize = 12.sp, fontWeight = FontWeight.Bold,
+                        maxLines = 1, overflow = TextOverflow.Ellipsis,
+                    )
+                }
+            }
+            Spacer(Modifier.height(4.dp))
+            // —— 「运行状态行」：中文状态 + 累计耗时 + （可选）activity 动作 ——
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Box(
+                    Modifier
+                        .background(stateColor.copy(alpha = 0.10f))
+                        .padding(horizontal = 5.dp, vertical = 1.dp),
+                ) {
+                    Text("$stateCn · $elapsed", color = stateColor, fontSize = 9.5.sp, fontWeight = FontWeight.Bold)
+                }
+                if (activityText.isNotBlank()) {
+                    Spacer(Modifier.width(6.dp))
+                    Text(activityText, color = u.fg, fontSize = 10.sp)
+                }
+            }
+            Spacer(Modifier.height(5.dp))
+            Text(
+                lead.title.ifBlank { lead.latestStep ?: "(无标题)" },
+                color = u.fg, fontSize = 11.sp, lineHeight = 15.sp,
+                maxLines = 2, overflow = TextOverflow.Ellipsis,
+            )
+            // 底部进度条（活跃程度指示）+ 摘要行
+            Spacer(Modifier.height(5.dp))
+            Box(
+                Modifier
+                    .fillMaxWidth()
+                    .height(1.5.dp)
+                    .background(u.border, RectangleShape),
+            ) {
+                Box(
+                    Modifier
+                        .fillMaxWidth(progress)
+                        .height(1.5.dp)
+                        .background(stateColor, RectangleShape),
+                )
+            }
+            Spacer(Modifier.height(4.dp))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                if (lead.subagents.isNotEmpty()) {
+                    Box(Modifier.background(u.panel2).padding(horizontal = 4.dp, vertical = 0.dp)) {
+                        Text(
+                            "子代理 ×${lead.subagents.size}",
+                            color = AgColors.Violet, fontSize = 9.sp, fontWeight = FontWeight.SemiBold,
+                        )
+                    }
+                    Spacer(Modifier.width(6.dp))
+                }
+                val usage = lead.tokenUsage
+                if (usage != null) {
+                    Text("Tokens", color = u.sub, fontSize = 9.sp)
+                    Spacer(Modifier.width(3.dp))
+                    Text(
+                        formatTokensCompact(usage.total),
+                        color = AgColors.Amber, fontSize = 10.sp, fontWeight = FontWeight.Bold,
+                    )
+                    Spacer(Modifier.width(5.dp))
+                }
+                if (waiting) {
+                    Spacer(Modifier.weight(1f))
+                    Box(Modifier.background(AgColors.Red.copy(alpha = 0.12f)).padding(horizontal = 4.dp, vertical = 0.dp)) {
+                        Text(
+                            "需处理 → 横屏",
+                            color = AgColors.Red, fontSize = 9.sp, fontWeight = FontWeight.Bold,
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+/** AgentLifecycle domain 枚举 → wire 字符串（复用 RemoteScreen 的 stateColorOf/stateCnOf） */
+private fun AgentLifecycle.wireName(): String = name.lowercase()
+
+/** 运行耗时格式化：34s / 1m23s / 2h05m / 1d3h */
+private fun formatElapsedMs(ms: Long): String {
+    val totalSec = ms / 1000
+    if (totalSec < 60) return "${totalSec}s"
+    val m = totalSec / 60
+    val s = totalSec % 60
+    if (m < 60) return String.format("%dm%02ds", m, s)
+    val h = m / 60
+    val mm = m % 60
+    if (h < 24) return String.format("%dh%02dm", h, mm)
+    val d = h / 24
+    val hh = h % 24
+    return String.format("%dd%dh", d, hh)
+}
+
+/** activity → 中文文字（运行中任务的"正在做什么"标签） */
+private fun activityCnOf(activity: AgentActivity?): String = when (activity) {
+    null -> ""
+    AgentActivity.THINKING -> "正在思考…"
+    AgentActivity.READING -> "正在阅读代码/文档"
+    AgentActivity.SEARCHING -> "正在搜索"
+    AgentActivity.EDITING -> "正在编辑文件"
+    AgentActivity.EXECUTING -> "正在执行命令"
+    AgentActivity.TESTING -> "正在运行测试"
+    AgentActivity.BROWSING -> "正在浏览网页"
+    AgentActivity.DELEGATING -> "正在调用子代理"
+}
+
+/** Agent 状态卡（布局 3.0）
+ *
+ *  ┌─────────────────────────────────────────────────────────┐
+ *  │ [C] Harness名 ●状态    右上：【缓存命中率 ▶ 87.3%】   │ ← Row 1
+ *  │     【已选】项目：vibe-remote（琥珀高亮）               │ ← Row 2
+ *  ├─────────────────────────────────────────────────────────┤
+ *  │  正在编辑文件：RemoteScreen.kt 增加命中率显示…         │ ← 中间摘要
+ *  ├─────────────────────────────────────────────────────────┤
+ *  │  左下：【Tokens 12.3k】（点击 → 明细对话框）           │
+ *  │                            右下：【切换项目 ›】（点击→Picker）│
+ *  └─────────────────────────────────────────────────────────┘
+ *
+ *  行为拆分（不再整卡 clickable）：
+ *    • 右上角缓存命中率胶囊 → 仅显示；
+ *    • 左下角 Tokens 数字（整条 clickable） → 弹 TokenDetailDialog，明细含命中率；
+ *    • 右下角「切换项目 ›」（整条 clickable） → 弹 ProjectPickerDialog。
  * */
 @Composable
 fun StatusCard(
@@ -1385,6 +1762,7 @@ fun StatusCard(
     val stateColor = stateColorOf(displayLifecycle)
     val stateCn = stateCnOf(displayLifecycle)
     val (mark, markColor) = sourceMark(displaySource)
+    val hitRate = working?.tokenUsage?.let { cacheHitRateOf(it) }
 
     var showPicker by remember { mutableStateOf(false) }
     var showTokenDialog by remember { mutableStateOf(false) }
@@ -1395,9 +1773,9 @@ fun StatusCard(
                 if (hasSelection) AgColors.Amber.copy(alpha = 0.06f) else u.panel,
             )
             .border(1.dp, if (hasSelection) AgColors.Amber else u.border)
-            .clickable { showPicker = true }
             .padding(10.dp),
     ) {
+        // ============== 顶行：Harness / 状态胶囊 / 右上 缓存命中率 ==============
         Row(verticalAlignment = Alignment.CenterVertically) {
             Box(
                 Modifier
@@ -1453,8 +1831,42 @@ fun StatusCard(
                     )
                 }
             }
+            // ============== 右上角：缓存命中率 ==============
+            Spacer(Modifier.width(8.dp))
+            if (hitRate == null) {
+                Box(
+                    Modifier
+                        .background(u.panel2)
+                        .border(1.dp, u.border)
+                        .padding(horizontal = 6.dp, vertical = 2.dp),
+                ) {
+                    Text("缓存命中率 · N/A", color = u.sub, fontSize = 9.sp)
+                }
+            } else {
+                val hrColor = when {
+                    hitRate >= 0.7f -> AgColors.Green
+                    hitRate >= 0.4f -> AgColors.Amber
+                    else -> AgColors.Orange
+                }
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier
+                        .background(hrColor.copy(alpha = 0.10f))
+                        .border(1.dp, hrColor.copy(alpha = 0.45f))
+                        .padding(horizontal = 6.dp, vertical = 2.dp),
+                ) {
+                    Box(Modifier.size(5.dp).clip(CircleShape).background(hrColor))
+                    Spacer(Modifier.width(3.dp))
+                    Text(
+                        "缓存 ${hitRatePercent(hitRate)}",
+                        color = hrColor, fontSize = 9.5.sp, fontWeight = FontWeight.Bold,
+                    )
+                }
+            }
         }
+
         Spacer(Modifier.height(6.dp))
+        // ============== 中间：任务标题/状态 ==============
         Text(
             when {
                 hasSelection && working == null -> "（该项目暂无运行任务）"
@@ -1463,18 +1875,50 @@ fun StatusCard(
             color = if (hasSelection && working == null) u.sub else u.fg,
             fontSize = 12.sp, lineHeight = 16.sp, maxLines = 2, overflow = TextOverflow.Ellipsis,
         )
-        // Token 摘要行
-        working?.tokenUsage?.let { usage ->
-            Spacer(Modifier.height(4.dp))
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text("Tokens", color = u.sub, fontSize = 10.sp)
-                Spacer(Modifier.width(5.dp))
+
+        Spacer(Modifier.height(8.dp))
+        // ============== 底行：左下 Tokens 点击看明细 ｜ 右下 切换项目 点击弹 Picker ==============
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            val tu = working?.tokenUsage
+            if (tu == null) {
+                // 无 Token 数据：左下角灰字占位
                 Text(
-                    formatTokensCompact(usage.total),
-                    color = AgColors.Amber, fontSize = 11.sp, fontWeight = FontWeight.Bold,
+                    text = "Tokens · —",
+                    color = u.sub, fontSize = 10.sp,
                 )
-                Spacer(Modifier.weight(1f))
-                Text("点击卡片选项目 / 看明细 →", color = AgColors.Cyan, fontSize = 9.sp)
+            } else {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier
+                        .clickable { showTokenDialog = true }
+                        .background(AgColors.Amber.copy(alpha = 0.08f))
+                        .padding(horizontal = 6.dp, vertical = 3.dp),
+                ) {
+                    Text("Tokens", color = u.sub, fontSize = 10.sp)
+                    Spacer(Modifier.width(4.dp))
+                    Text(
+                        formatTokensCompact(tu.total),
+                        color = AgColors.Amber, fontSize = 11.sp, fontWeight = FontWeight.Bold,
+                    )
+                    Spacer(Modifier.width(3.dp))
+                    Text("↗", color = AgColors.Cyan, fontSize = 9.sp)
+                }
+            }
+            Spacer(Modifier.weight(1f))
+            // 右下角「切换项目 ›」（替代原"整卡点击打开选择器"）
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier
+                    .clickable { showPicker = true }
+                    .background(AgColors.Cyan.copy(alpha = 0.08f))
+                    .padding(horizontal = 6.dp, vertical = 3.dp),
+            ) {
+                Text(
+                    text = if (selectedProject == null) "切换项目" else "切换项目",
+                    color = AgColors.Cyan, fontSize = 10.sp, fontWeight = FontWeight.SemiBold,
+                )
+                Spacer(Modifier.width(2.dp))
+                Text("›", color = AgColors.Cyan, fontSize = 12.sp)
             }
         }
     }
@@ -1487,8 +1931,7 @@ fun StatusCard(
             onPick = { p ->
                 onSelectProject(p)
                 showPicker = false
-                // 选择了具体项目 → 顺便立即打开该项目的 Token 明细（自动模式不自动开）
-                if (p != null) showTokenDialog = true
+                // 选中具体项目后不再自动开明细（让用户再点"左下 Tokens"才开，贴合新按钮语义）
             },
             onViewTokens = { showPicker = false; showTokenDialog = true },
             onClear = { onSelectProject(null) },
@@ -1504,6 +1947,20 @@ fun StatusCard(
             onDismiss = { showTokenDialog = false },
         )
     }
+}
+
+/** TokenUsage → 缓存命中率（cachedInput / (input + cachedInput)，null 表示无可计算分母） */
+private fun cacheHitRateOf(usage: TokenUsage): Float? {
+    val denom = usage.input.toLong() + usage.cachedInput.toLong()
+    return if (denom <= 0L) null else usage.cachedInput.toFloat() / denom.toFloat()
+}
+
+/** 命中率 % 字符串，保留 1 位小数（66% / 87.3%） */
+private fun hitRatePercent(rate: Float): String {
+    val percent = (rate * 1000).toInt()
+    val intPart = percent / 10
+    val fracPart = percent % 10
+    return if (fracPart == 0) "${intPart}%" else "${intPart}.${fracPart}%"
 }
 
 /** 项目选择器对话框（分组列表 + 当前选中高亮 + 明细入口 + 清空） */
@@ -1638,8 +2095,6 @@ private fun ProjectPickerRow(
 private fun harnessDisplayName(source: String): String = when (source.lowercase()) {
     "claude", "claudecode", "claude_code", "cc" -> "Claude Code"
     "codex", "openai_codex", "cli" -> "Codex CLI"
-    "trae" -> "Trae"
-    "deepseek" -> "DeepSeek"
     "solo", "soloagent" -> "Solo Agent"
     else -> source.ifBlank { "Agent" }
 }
@@ -1732,7 +2187,23 @@ private fun TokenDetailDialog(
                         UsageRow("输出 (Output)", formatTokensCompact(usage.output), AgColors.Cyan)
                         Spacer(Modifier.height(4.dp))
                         UsageRow("推理 (Reasoning)", formatTokensCompact(usage.reasoningOutput), AgColors.Amber)
-                        Spacer(Modifier.height(6.dp))
+                        Spacer(Modifier.height(4.dp))
+                        cacheHitRateOf(usage).also { hr ->
+                            if (hr == null) {
+                                UsageRow(
+                                    "缓存命中率",
+                                    "（无缓存/命中数据）",
+                                    u.sub,
+                                )
+                            } else {
+                                val hrColor = when {
+                                    hr >= 0.7f -> AgColors.Green
+                                    hr >= 0.4f -> AgColors.Amber
+                                    else -> AgColors.Orange
+                                }
+                                UsageRow("缓存命中率", hitRatePercent(hr), hrColor)
+                            }
+                        }
                         Spacer(Modifier.height(6.dp))
                         Box(Modifier.fillMaxWidth().height(1.dp).background(u.border))
                         Spacer(Modifier.height(6.dp))

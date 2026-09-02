@@ -1,4 +1,4 @@
-# Vibe Remote 开发日志（v2.0）
+# Vibe Remote 开发日志（v2.0 → v2.1）
 
 > 本文档面向未来接手本项目的 AI 智能体（Harness / Codex / Claude 等）以及新开发者。
 > 目标：在最短时间内理解整个项目的架构、数据流、关键约束、如何编译运行。
@@ -7,10 +7,11 @@
 
 ## 0. 版本 / 里程碑
 
-| 分支         | Commit    | 说明                                                                                      |
-| ---------- | --------- | --------------------------------------------------------------------------------------- |
-| `main`     | `6a4b07d` | 旧版本：GUI 桌面窗口 + 系统托盘 + 基础 Agent 页（手绘 UI）                                                 |
-| **`v2.0`** | `5490feb` | **当前稳定版本**：AgentPager 全量移植（任务列表 / 详情 / 用量仪表盘 / 设置 / 8-bit 音效 / 像素核心渲染 / 任务删除 / Hook 聚合） |
+| 分支         | Commit    | 说明                                                                                        |
+| ---------- | --------- | ----------------------------------------------------------------------------------------- |
+| `main`     | `6a4b07d` | 旧版本：GUI 桌面窗口 + 系统托盘 + 基础 Agent 页（手绘 UI）                                                   |
+| `v2.0`     | `5490feb` | AgentPager 全量移植（任务列表 / 详情 / 用量仪表盘 / 设置 / 8-bit 音效 / 像素核心渲染 / 任务删除 / Hook 聚合）              |
+| **`v2.1`** | 当前        | **Hook 四 Bug 修复** + **Trae/DeepSeek 移除**（仅保留 Claude Code / Codex 两家）+ **get\_tasks 首屏拉取** |
 
 *当前工作目录*：`d:\AIData\traedata\vibe-remote`
 
@@ -124,6 +125,7 @@ vibe-remote/
 | `get_logs`                                   | 获取运行日志                                   | -                                             |
 | **`task_control`**                           | v2.0：手机控制 agent 状态                       | **见 4.1.1**                                   |
 | **`get_usage`**                              | v2.0：立即刷新 Codex 用量                       | -                                             |
+| **`get_tasks`**                              | v2.1：配对后立即拉取当前 tasks + usage 快照          | -                                             |
 
 #### 4.1.1 `task_control` 格式（核心！）
 
@@ -150,21 +152,21 @@ vibe-remote/
 
 ### 4.2 WebSocket 下行（桌面 → 手机）
 
-| type          | 用途                                                                   |
-| ------------- | -------------------------------------------------------------------- |
-| `pair_info`   | 需要输入确认码：`{token, confirm_code, expires_in}`                          |
-| `paired`      | 配对成功：`{id, max_clients}`；**随后立即推送 tasks 快照**                         |
-| `error`       | 错误：`{code, message}`                                                 |
-| `keymap`      | 键位文档：`{keys: [...]}`                                                 |
-| `peer_info`   | 设备列表：`{clients, maxClients, peers:[{id,name,online,ip,seenAt}]}`     |
-| `status`      | Agent 状态：`{state,message,source,project}`（已被 tasks 取代，仍保留 PadPage 用） |
-| `session`     | 旧版会话状态：`{phase,message}`（同上）                                         |
-| `voice_label` | 电脑侧语音识别反馈                                                            |
-| **`tasks`**   | v2.0 主力：`{tasks:[...], focusedTaskID, pendingRequests, usage}`       |
+| type          | 用途                                                                        |
+| ------------- | ------------------------------------------------------------------------- |
+| `pair_info`   | 需要输入确认码：`{token, confirm_code, expires_in}`                               |
+| `paired`      | 配对成功：`{id, max_clients}`；**随后手机端自动发** **`get_tasks`** **拉取现存任务**（v2.1 新增） |
+| `error`       | 错误：`{code, message}`                                                      |
+| `keymap`      | 键位文档：`{keys: [...]}`                                                      |
+| `peer_info`   | 设备列表：`{clients, maxClients, peers:[{id,name,online,ip,seenAt}]}`          |
+| `status`      | Agent 状态：`{state,message,source,project}`（已被 tasks 取代，仍保留 PadPage 用）      |
+| `session`     | 旧版会话状态：`{phase,message}`（同上）                                              |
+| `voice_label` | 电脑侧语音识别反馈                                                                 |
+| **`tasks`**   | v2.0 主力：`{tasks:[...], focusedTaskID, pendingRequests, usage}`            |
 
 ### 4.3 Hook TCP（Claude/Codex → 桌面端 localhost:49361）
 
-桌面端 `_start_hook_tcp_server` 监听，`agent_hook.py` 以 `--hook --source claude|codex` 方式被 Claude/Codex 调用：
+桌面端 `_start_hook_tcp_server` 监听，`agent_hook.py` 以 `--hook --source claude|codex` 方式被 Claude/Codex 调用（v2.1 起仅支持这两家）：
 
 ```
 Claude/Codex stdin (JSON) → agent_hook.py → TCP 127.0.0.1:49361
@@ -191,10 +193,12 @@ taskDescription ↔ task_description
 
 | 事件                                                                | lifecycle                                                         | capabilities                                                                                            |
 | ----------------------------------------------------------------- | ----------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------- |
-| SessionStart                                                      | starting                                                          | \[]（若带 userPrompt，则直接填 title）                                                                           |
+| SessionStart                                                      | **running**（v2.1 修正：原 starting 会导致手机端一直显示"思考中"）                   | \[]（若带 userPrompt，则直接填 title）；activity 初始化为 **thinking**                                                |
 | UserPromptSubmit                                                  | running                                                           | \[interrupt]                                                                                            |
 | PreToolUse / PostToolUse                                          | running                                                           | \[interrupt] + 从 toolName 推断 activity（executing/searching/reading/editing/browsing/delegating/thinking） |
+| **token\_count**（v2.1 新增）                                         | 不切 lifecycle；合并到 task.tokenUsage + usage\_snapshot                | -                                                                                                       |
 | PermissionRequest                                                 | waitingApproval（permissionMode 含 tool/bash/file） 否则 waitingAnswer | \[approve, deny, answer, interrupt]                                                                     |
+| PreToolUse(**AskUserQuestion**)（v2.1 新增识别）                        | waitingAnswer                                                     | \[answer, interrupt]                                                                                    |
 | PostToolUseFailure / PermissionDenied                             | interrupted                                                       | \[retry]                                                                                                |
 | Stop                                                              | succeeded（除非已 interrupted）                                        | \[retry]                                                                                                |
 | StopFailure                                                       | 回滚 succeeded → running                                            | \[]                                                                                                     |
@@ -205,13 +209,18 @@ taskDescription ↔ task_description
 ### 4.5 PermissionRequest 等待链路（必须理解）
 
 ```
-hook TCP 收到 PermissionRequest
+hook TCP 收到 PermissionRequest / PreToolUse(AskUserQuestion) / Notification(idle_prompt)
+  → _is_permission_event 识别（v2.1 新增 AskUserQuestion + idle_prompt 识别）
   → 标记 task.lifecycle = waitingApproval / waitingAnswer
   → 把 TCP sock 复制到 self._pending_permission[session_id]
   → broadcast_tasks() 手机出现按钮
   → 本协程每 0.5s 轮询 lifecycle，直到非 waiting*（手机审批触发）或超时 24h
   → approve/deny 通过 _pending_permission[session_id].sendall(allow JSON) 回写
   → answer 写入 task.answerText + 附带 socket approve
+    → v2.1: _encode_permission_response 额外写入 hookSpecificOutput.updatedInput.answers
+      和 additionalContext（纯文本 [来自手机回答]\n<answer>\n），确保 CLI 能看到回答
+  → v2.1: 权限响应发送使用 sock.dup() 创建独立 fd + shutdown(SHUT_WR) + drain
+    避免 socket 主 fd 共享导致响应发送提前 EOF/空串
   → delete 先 approve 再 pop task + deleted_tasks
 ```
 
@@ -269,7 +278,7 @@ MainActivity.setContent → AppContent
 
 - **AgentGridTheme**：像素字体 `fusion_pixel_12px_zh_hans.ttf` + 深色调色板（Bg=`#05070B` / Amber=`#FDBA4A` 主色），无亮色主题切换。
 
-- **任务卡片**：彩色 lifecycle 圆点、来源徽标（C/X/T/D/S 对应 Claude/Codex/Trae/DeepSeek/Solo）、项目名+标题+最近步骤+子代理 Mini 行、8-bit 音效差分触发（`TaskSoundTracker.nextCue`）。
+- **任务卡片**：彩色 lifecycle 圆点、来源徽标（C/X 对应 Claude/Codex）、项目名+标题+最近步骤+子代理 Mini 行、8-bit 音效差分触发（`TaskSoundTracker.nextCue`）。
 
 - **紧急任务置顶展开**：`TaskDashboardProjector.urgentTaskID` / `automaticallyExpandedTaskID`，其他任务变暗色（`AgColors.Dimmed`）。
 
@@ -307,13 +316,15 @@ VibeRemoteServer(websockets.WebSocketServerProtocol)
 └─ run                    生命周期：音频线程 + adb reverse + Hook TCP + rollout tick + usage tick + WS 服务
 ```
 
-### 6.2 agent\_hook.py
+### 6.2 agent\_hook.py（v2.1：仅 Claude + Codex 两家）
 
-- `--install claude|codex|both`：把 `vibe_agent_hook.exe --hook --source xxx` 写入 Claude Code 配置 / Codex hooks 配置；
+- `--install claude|codex|all`：把 `vibe_agent_hook.exe --hook --source xxx` 写入 Claude Code 配置（`~/.claude/settings.json`）/ Codex hooks 配置（`~/.codex/hooks.json`）；
 
 - `--uninstall`：移除 WRAP\_TAG 标记的条目；
 
 - `--hook --source xxx`：读取 stdin → TCP localhost:49361 → Permission 等待 server 决策写 stdout；非权限等 `\n` 即返回。Hook server 未启动必须静默放行（Permission 事件默认 allow，避免卡死 agent）。
+
+- **v2.1 变更**：移除了 Trae / DeepSeek 支持（`FAMILY`、`detect_source`、`install_*`/`uninstall_*`、CLI choices）。`CLAUDE_EVENTS` 新增 `token_count` 事件。`_is_permission_event` 新增识别 `PreToolUse(AskUserQuestion)` 和 `Notification(idle_prompt)`。
 
 ### 6.3 codex\_usage.py（UsageSnapshot 字段）
 
@@ -415,6 +426,11 @@ pyinstaller vibe-remote.spec --noconfirm
 21. **子代理显示**：父任务卡片显示正在工作的子代理、耗时、最近步骤、token。已在 `SubMiniRow` / 详情 subagent 列表实现。
 22. **配额监控**：TASKS 页顶部显示 Codex 5 小时 + 周用量 + `UsageDashboard` 明细点开查看，界面对齐 AgentPager。
 23. **任务交互**：TASKS 页每条有 **ANSWER** 按钮、详情页有回复输入框。
+24. **仅支持 Claude Code + Codex 两家 harness**（v2.1）：Trae / DeepSeek 已从代码和钩子配置中完全移除，不要再加回来。
+25. **配对后自动拉取 tasks**（v2.1）：Android `RemoteClient.kt` 在 `paired` 后立即发 `get_tasks`，确保首屏能看到正在进行的对话和已累积的 token 用量。
+26. **SessionStart 直接映射 running**（v2.1）：不再走 starting 中间态，避免手机端卡在"思考中"。
+27. **手机端状态字符串大小写兼容**（v2.1）：`stateCnOf`/`stateColorOf` 使用 `.uppercase()` 匹配，服务端发送小写（running/starting）也能正确显示。
+28. **token\_count 事件必须装**（v2.1）：钩子配置必须包含 `token_count` 事件，否则手机端看不到 token 消耗和缓存命中率。
 
 ***
 

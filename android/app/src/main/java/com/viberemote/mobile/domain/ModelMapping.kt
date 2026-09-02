@@ -34,6 +34,8 @@ private fun activityFromWire(value: String?): AgentActivity? = when (value?.trim
 
 private fun sourceFromWire(value: String?): AgentSource = when (value?.trim()?.lowercase()) {
     "claude", "claudecode", "claude_code" -> AgentSource.CLAUDE_CODE
+    "codex-desktop", "codex_desktop", "codexgui", "codex_gui" -> AgentSource.CODEX_DESKTOP
+    null, "codex", "codexcli", "codex_cli" -> AgentSource.CODEX_CLI
     else -> AgentSource.CODEX_CLI
 }
 

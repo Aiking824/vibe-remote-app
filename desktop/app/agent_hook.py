@@ -1,8 +1,16 @@
 """Vibe Remote Agent Hook（方案 B：自建 Hook 接收程序）。
 
+支持的 Harness：
+  - claude     = Anthropic Claude Code（~/.claude/settings.json hooks 节）
+  - codex      = OpenAI Codex（~/.codex/hooks.json）
+  - all        = 一键安装/卸载以上两家全部
+
 用法：
-  python agent_hook.py --hook --source claude   # Claude Code 调用
-  python agent_hook.py --hook --source codex    # Codex 调用
+  python agent_hook.py --hook --source claude     # Claude Code 调用
+  python agent_hook.py --hook --source codex      # Codex 调用
+
+  python agent_hook.py --install all              # 两家全部装
+  python agent_hook.py --uninstall all            # 两家全部卸
 
 协议（与 AgentPager HookTcpServer 对齐）：
   stdin JSON  -->  TCP(127.0.0.1:49361) 换行包  {"hook_source":"claude|codex","payload":{...}}
@@ -18,10 +26,18 @@ import sys
 import time
 from pathlib import Path
 
-HOOK_PORT = 49361
+HOOK_PORT = int(os.environ.get("VIBE_HOOK_PORT", "49361"))
 TCP_TIMEOUT = 1.5          # 非权限事件的最大阻塞时间（避免卡死 agent）
 PERMISSION_TIMEOUT = 86400  # 权限事件允许挂一整天等用户决策
 WRAP_TAG = "Managed by Vibe Remote"
+
+# 按 hook 协议家族分类：
+#   "claude_family" = Claude Code（PermissionRequest 决策 JSON 格式相同 + 事件名一致）
+#   "codex_family"  = OpenAI Codex
+FAMILY = {
+    "claude": "claude_family",
+    "codex": "codex_family",
+}
 
 
 # ========== 入口：hook stdin -> TCP ==========
@@ -29,14 +45,15 @@ def run_hook_cli(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="vibe-agent-hook")
     parser.add_argument("--hook", action="store_true")
     parser.add_argument("--source", choices=["claude", "codex"], default=None)
-    parser.add_argument("--install", choices=["claude", "codex", "both"], default=None)
-    parser.add_argument("--uninstall", choices=["claude", "codex", "both"], default=None)
+    parser.add_argument("--install", choices=["claude", "codex", "both", "all"], default=None)
+    parser.add_argument("--uninstall", choices=["claude", "codex", "both", "all"], default=None)
     parser.add_argument("--exe", default=None, help="安装时指定 hook 可执行文件路径（默认 sys.argv[0] 所在的 vibe_agent_hook.exe）")
     parser.add_argument("--version", action="store_true", help="输出版本号并退出")
     args = parser.parse_args(argv)
 
     if args.version:
-        print("vibe-agent-hook 0.3.0 (Vibe Remote / AgentPager protocol compatible)")
+        print("vibe-agent-hook 0.4.0 (Vibe Remote / AgentPager protocol compatible)")
+        print("  supported sources: claude, codex")
         return 0
     if args.install:
         return cmd_install(args.install, args.exe)
@@ -47,7 +64,7 @@ def run_hook_cli(argv: list[str] | None = None) -> int:
         return 0
 
     # ---- 作为 hook 被 agent 调用 ----
-    # 1) 从 stdin 读 JSON（Claude/Codex 约定是整段 JSON 或首行 JSON）
+    # 1) 从 stdin 读 JSON（约定是整段 JSON 或首行 JSON）
     try:
         raw = sys.stdin.read()
     except Exception as e:
@@ -75,7 +92,7 @@ def run_hook_cli(argv: list[str] | None = None) -> int:
         try:
             sock.sendall(envelope.encode("utf-8"))
             if is_permission:
-                # 等 server 回决策（与 AgentPager ClaudeHookOutput/CodexHookOutput 对齐）
+                # 等 server 回决策（决策格式按 family）
                 resp = _read_all(sock, timeout=PERMISSION_TIMEOUT)
                 if resp:
                     sys.stdout.buffer.write(resp)
@@ -93,7 +110,7 @@ def run_hook_cli(argv: list[str] | None = None) -> int:
                 pass
     except Exception as e:
         # Hook 服务器未启动则静默跳过，不阻塞 agent 正常工作
-        sys.stderr.write(f"[vibe-hook] tcp send fail: {e}\n")
+        sys.stderr.write(f"[vibe-hook] tcp send fail (source={source}): {e}\n")
         # 权限事件必须输出 allow 决策避免卡死 agent
         if is_permission:
             _emit_default_permission_stdout(source)
@@ -102,23 +119,35 @@ def run_hook_cli(argv: list[str] | None = None) -> int:
 
 
 def detect_source(raw: str) -> str | None:
-    """根据 payload 字段猜测来源。"""
+    """根据 payload 字段猜测来源。优先级：显式 source 字段 → 目录特征 → 兜底claude族。"""
     try:
         obj = json.loads(raw)
     except Exception:
         return None
-    # 优先看用户传的 source
-    if isinstance(obj, dict):
-        src = str(obj.get("source", "") or "").lower()
-        if "claude" in src:
-            return "claude"
-        if "codex" in src:
-            return "codex"
-        # Codex 有明确的 codex 专用字段组合
-        if obj.get("turn_id") and obj.get("transcript_path"):
-            return "codex"
-        if obj.get("hook_event_name") == "PermissionRequest" and obj.get("permission_mode") is not None:
-            return "claude"
+    if not isinstance(obj, dict):
+        return None
+
+    def _has(*names: str) -> bool:
+        return any(n in obj and obj[n] not in (None, "") for n in names)
+
+    def _s(*names: str) -> str:
+        for n in names:
+            v = obj.get(n)
+            if v not in (None, ""):
+                return str(v)
+        return ""
+
+    src = str(obj.get("source", "") or "").lower()
+    if "claude" in src:
+        return "claude"
+    if "codex" in src:
+        return "codex"
+    # Codex 专用字段组合（turn_id + transcript_path / session_id 等标准 codex hook 字段）
+    if obj.get("turn_id") and (obj.get("transcript_path") or _has("hookRunId", "hook_run_id")):
+        return "codex"
+    # PermissionRequest 带 Claude 风格 permission_mode → 默认 claude 族 claude
+    if obj.get("hook_event_name") == "PermissionRequest" and obj.get("permission_mode") is not None:
+        return "claude"
     return None
 
 
@@ -135,13 +164,27 @@ def _safe_parse(raw: str) -> dict:
 
 
 def _is_permission_event(source: str, envelope: str) -> bool:
+    """挂起等手机决策的事件。
+    除标准 PermissionRequest 外，AskUserQuestion PreToolUse 与 idle_prompt 通知也需要
+    用户回答/交互，必须挂起 TCP 连接直到手机端 task_control 回写。
+    """
     try:
         obj = json.loads(envelope)
         payload = obj.get("payload") or {}
         name = str(payload.get("hook_event_name") or "")
-        return name == "PermissionRequest"
+        if name == "PermissionRequest":
+            return True
+        if name == "PreToolUse":
+            tn = str(payload.get("tool_name") or payload.get("toolName") or "").strip()
+            if tn == "AskUserQuestion":
+                return True
+        if name == "Notification":
+            nt = str((payload.get("notification_type") or payload.get("notificationType") or "")).lower()
+            if nt in ("idle_prompt", "elicitation_dialog", "agent_needs_input"):
+                return True
     except Exception:
-        return False
+        pass
+    return False
 
 
 def _read_all(sock: socket.socket, timeout: float) -> bytes:
@@ -190,7 +233,8 @@ def _read_line(sock: socket.socket, timeout: float) -> str:
 
 def _emit_default_permission_stdout(source: str) -> None:
     """hook 服务没启动时，权限事件默认 allow 以避免卡死 agent。"""
-    if source == "claude":
+    if FAMILY.get(source) == "claude_family":
+        # claude：行为一致（Claude Code hooks 协议）
         resp = {
             "continue": True,
             "suppressOutput": True,
@@ -199,7 +243,7 @@ def _emit_default_permission_stdout(source: str) -> None:
                 "decision": {"behavior": "allow"},
             },
         }
-    else:  # codex
+    else:  # codex_family
         resp = {
             "continue": True,
             "hookSpecificOutput": {
@@ -211,7 +255,12 @@ def _emit_default_permission_stdout(source: str) -> None:
     sys.stdout.flush()
 
 
-# ========== Claude / Codex Hook 安装 & 卸载（对齐 AgentPager ClaudeHookConfiguration / CodexHookConfiguration） ==========
+# ========== 两家 Hook 安装 & 卸载（对齐 AgentPager ClaudeHookConfiguration / CodexHookConfiguration）
+#
+#   claude   ->  ~/.claude/settings.json hooks（CLAUDE_CONFIG_DIR 可覆盖）
+#   codex    ->  ~/.codex/hooks.json          （保留）
+#
+# ==========
 
 def _default_hook_exe(user_spec: str | None) -> str:
     if user_spec:
@@ -251,6 +300,8 @@ CLAUDE_EVENTS: list[tuple[str, str | None, int | None]] = [
     ("PostToolUseFailure", "*", None),
     ("PermissionDenied", "*", None),
     ("PreCompact", None, None),
+    # Token 用量事件（Claude Code / Trae CN 内部推送）：累加 tokenUsage 并广播到手机端
+    ("token_count", None, None),
 ]
 
 CODEX_EVENTS: list[tuple[str, str | None, int]] = [
@@ -260,6 +311,8 @@ CODEX_EVENTS: list[tuple[str, str | None, int]] = [
     ("PostToolUse", None, 45),
     ("PermissionRequest", None, 3600),
     ("Stop", None, 45),
+    # Token 用量事件（Codex 同步发送）：累加 tokenUsage
+    ("token_count", None, 45),
 ]
 
 
@@ -468,35 +521,40 @@ def uninstall_codex() -> tuple[bool, str | None]:
     return _write_json(path, root, delete_empty=True)
 
 
+def _install_one(label: str, target: str, fn, exe_path: str) -> None:
+    ok, backup = fn(exe_path)
+    print(f"[vibe-hook] {label:<9}{'已安装' if ok else '已是最新状态'}")
+    if backup:
+        print(f"  backup: {backup}")
+    print(f"  command: {exe_path} --hook --source {target}")
+
+
+def _uninstall_one(label: str, fn) -> None:
+    ok, backup = fn()
+    print(f"[vibe-hook] {label:<9}{'已卸载' if ok else '未安装'}")
+    if backup:
+        print(f"  backup: {backup}")
+
+
 def cmd_install(target: str, exe: str | None) -> int:
     exe_path = _default_hook_exe(exe)
-    rc = 0
-    if target in ("claude", "both"):
-        ok, backup = install_claude(exe_path)
-        print(f"[vibe-hook] Claude: {'已安装' if ok else '已是最新状态'}")
-        if backup:
-            print(f"  backup: {backup}")
-        print(f"  command: {exe_path} --hook --source claude")
-    if target in ("codex", "both"):
-        ok, backup = install_codex(exe_path)
-        print(f"[vibe-hook] Codex:  {'已安装' if ok else '已是最新状态'}")
-        if backup:
-            print(f"  backup: {backup}")
-        print(f"  command: {exe_path} --hook --source codex")
+    # "all" = 两家全部；"both" 同义
+    set_all = {"claude", "codex"}
+    picked = set_all if target in ("all", "both") else {target}
+    if "claude" in picked:
+        _install_one("Claude", "claude", install_claude, exe_path)
+    if "codex" in picked:
+        _install_one("Codex", "codex", install_codex, exe_path)
     return 0
 
 
 def cmd_uninstall(target: str) -> int:
-    if target in ("claude", "both"):
-        ok, backup = uninstall_claude()
-        print(f"[vibe-hook] Claude: {'已卸载' if ok else '未安装'}")
-        if backup:
-            print(f"  backup: {backup}")
-    if target in ("codex", "both"):
-        ok, backup = uninstall_codex()
-        print(f"[vibe-hook] Codex:  {'已卸载' if ok else '未安装'}")
-        if backup:
-            print(f"  backup: {backup}")
+    set_all = {"claude", "codex"}
+    picked = set_all if target in ("all", "both") else {target}
+    if "claude" in picked:
+        _uninstall_one("Claude", uninstall_claude)
+    if "codex" in picked:
+        _uninstall_one("Codex", uninstall_codex)
     return 0
 
 

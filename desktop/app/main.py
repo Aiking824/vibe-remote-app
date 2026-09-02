@@ -1,7 +1,7 @@
-"""Vibe Remote 电脑端服务（trae 风格控制台）。
+"""Vibe Remote 电脑端服务。
 
 单端口 8765：
-  HTTP  : 托管 trae 风格管理面板（/）、配对控制台（/pair/console）、二维码
+  HTTP  : 托管管理面板（/）、配对控制台（/pair/console）、二维码
   WS    : /ws  配对 / 按键 / 语音流 / 按键映射管理 / 状态 / 语音命令日志
 
 在 vibe-flow 基础上新增：
@@ -645,6 +645,19 @@ class VibeRemoteServer:
                     break
         elif kind == "task_control":
             await self._handle_task_control(websocket, msg)
+        elif kind == "get_tasks":
+            # 手动拉取当前任务快照（用于手机端刷新 / E2E 测试校验）
+            snapshot = sorted(self.tasks.values(), key=lambda t: -(self._effective_priority(t)))
+            await self._send_json(
+                websocket,
+                {
+                    "type": "tasks",
+                    "tasks": snapshot,
+                    "focusedTaskID": None,
+                    "pendingRequests": self._pending_requests(),
+                    "usage": self.usage_snapshot,
+                },
+            )
         elif kind == "get_usage":
             # 手机端手动刷新 Codex 用量（立即重载并回发 usage 消息）
             try:
@@ -707,6 +720,14 @@ class VibeRemoteServer:
 
         session_id = str(_get(payload, "session_id", "sessionId") or "").strip()
         if not session_id:
+            # Trae CN 极个别事件可能只带 sessionId（大小写 + 别名已经读），兜底：若 payload
+            # 含其它唯一 id 字段也尝试读，避免整个 hook 事件被丢弃。
+            for alt in ("id", "taskId", "task_id"):
+                cand = str(payload.get(alt) or "").strip()
+                if cand:
+                    session_id = cand
+                    break
+        if not session_id:
             return "", False
         # 手机端已删除的任务不再通过 hook 事件复活
         if session_id in self.deleted_tasks:
@@ -757,19 +778,33 @@ class VibeRemoteServer:
         # ---- 生命周期映射（AgentPager AgentLifecycle 对齐）----
         ev = event_name
         prev_lifecycle = existing["lifecycle"]
+        # token_count / ContextTokenUsage 等用量事件：不改状态，只累加 tokenUsage 与 usage_snapshot
+        if ev in ("token_count", "ContextTokenUsage", "TokenUsageUpdate"):
+            changed_usage = self._merge_usage(existing, payload)
+            existing["updatedAt"] = now
+            # 用量变化需要立即广播（手机端「缓存命中率 / Tokens 数字」依赖此）
+            if changed_usage:
+                self.loop.call_soon_threadsafe(self.broadcast_tasks)
+            return session_id, False
         if ev == "SessionStart":
-            existing["lifecycle"] = "starting"
+            # 启动即视为 running（Claude 会紧接着思考/调用工具，避免 starting 卡住文案）
+            existing["lifecycle"] = "running"
+            existing["activity"] = "thinking"
             existing["startedAt"] = now
-            existing["capabilities"] = []
+            existing["capabilities"] = ["interrupt"]
             # SessionStart 一般直接带 userPrompt / projectName
-            up = str(_get(payload, "userPrompt", "prompt") or "")
+            up = str(_get(payload, "userPrompt", "prompt", "promptText") or "")
             if up and not existing.get("userPrompt"):
                 existing["userPrompt"] = up[:500]
                 existing["title"] = up[:80]
+            # 顺带把来源路径的 projectName 修正为更有意义的最后一级目录
+            pn = self._project_name_from(payload)
+            if pn and pn != "Agent":
+                existing["projectName"] = pn
         elif ev == "UserPromptSubmit":
             existing["lifecycle"] = "running"
             if not existing.get("userPrompt"):
-                up = str(_get(payload, "userPrompt", "prompt") or "")[:500]
+                up = str(_get(payload, "userPrompt", "prompt", "promptText") or "")[:500]
                 existing["userPrompt"] = up
                 existing["title"] = up[:80]
             existing["activity"] = "thinking"
@@ -780,27 +815,51 @@ class VibeRemoteServer:
             step = self._summarize_step(payload)
             if step:
                 existing["latestStep"] = step
-            existing["capabilities"] = ["interrupt"]
+            # AskUserQuestion 工具：视为「等待回答」+ 挂起为权限（需要手机回答时写 updatedInput=answers）
+            tool_raw = str(_get(payload, "tool_name", "toolName") or "")
+            if tool_raw == "AskUserQuestion":
+                existing["lifecycle"] = "waitingAnswer"
+                existing["activity"] = "thinking"
+                existing["capabilities"] = ["answer", "interrupt"]
+                existing["pendingKind"] = "question"
+                existing["pendingHookEvent"] = "PreToolUse"  # 用于 encode 时选 hookEventName
+                ti = _get(payload, "tool_input", "toolInput")
+                existing["lastAskUserQuestionInput"] = (ti if isinstance(ti, dict) else None)
+            else:
+                existing["capabilities"] = ["interrupt"]
+                existing.pop("lastAskUserQuestionInput", None)
+                existing.pop("pendingHookEvent", None)
         elif ev == "PostToolUse":
             existing["lifecycle"] = "running"
             existing["activity"] = activity or existing["activity"] or "thinking"
             existing["capabilities"] = ["interrupt"]
+            existing.pop("lastAskUserQuestionInput", None)
+            existing.pop("pendingHookEvent", None)
+            # Claude / Trae 把 usage 放在 PostToolUse 的 info/total_token_usage
+            self._merge_usage(existing, payload)
         elif ev == "PermissionRequest":
             pm = str(_get(payload, "permission_mode", "permissionMode") or "").lower()
             existing["lifecycle"] = "waitingApproval" if "tool" in pm or "bash" in pm or "file" in pm else "waitingAnswer"
             existing["activity"] = None
             existing["capabilities"] = ["approve", "deny", "answer", "interrupt"]
+            existing["pendingHookEvent"] = "PermissionRequest"
+            if existing["lifecycle"] == "waitingAnswer":
+                existing["pendingKind"] = "question"
+            else:
+                existing["pendingKind"] = "approval"
         elif ev == "PostToolUseFailure":
             existing["lifecycle"] = "interrupted"
             existing["completedAt"] = now
             existing["activity"] = None
             existing["capabilities"] = ["retry"]
+            existing.pop("pendingHookEvent", None)
         elif ev == "PermissionDenied":
             # Codex 权限被拒绝 → 该次运行终结（AgentPager 语义：Interrupted）
             existing["lifecycle"] = "interrupted"
             existing["completedAt"] = now
             existing["activity"] = None
             existing["capabilities"] = ["retry"]
+            existing.pop("pendingHookEvent", None)
         elif ev == "Stop":
             # Codex 会话/进程停止：曾被中断的保持 interrupted，其余视为正常完成（AgentPager 语义）
             if existing["lifecycle"] != "interrupted":
@@ -808,6 +867,7 @@ class VibeRemoteServer:
             existing["completedAt"] = now
             existing["activity"] = None
             existing["capabilities"] = ["retry"]
+            existing.pop("pendingHookEvent", None)
         elif ev == "StopFailure":
             # 停止失败：完成态回滚为运行（AgentPager 语义）
             if existing["lifecycle"] == "succeeded":
@@ -821,6 +881,7 @@ class VibeRemoteServer:
                 existing["completedAt"] = None
             existing["activity"] = None
             existing["capabilities"] = []
+            existing.pop("pendingHookEvent", None)
         elif ev == "SubagentStart":
             # Codex 子代理（子任务），合并到 subagents
             sub_id = str(_get(payload, "agent_id", "agentId") or f"sub-{now}")
@@ -859,7 +920,12 @@ class VibeRemoteServer:
                 existing["lifecycle"] = "waitingAnswer"
                 existing["activity"] = "thinking"
                 existing["completedAt"] = None
+                existing["pendingKind"] = "question"
+                existing["pendingHookEvent"] = "Notification"
                 existing["capabilities"] = ["answer", "interrupt"]
+                q = str(payload.get("message") or payload.get("title") or "")
+                if q:
+                    existing["latestStep"] = q[:220]
             else:
                 existing["latestStep"] = str(payload.get("message") or payload.get("title") or "")[:200] or existing["latestStep"]
 
@@ -869,8 +935,82 @@ class VibeRemoteServer:
         if lifecycle_changed and existing["lifecycle"] in ("succeeded", "interrupted"):
             existing["isUnread"] = True
 
-        is_permission = event_name == "PermissionRequest"
+        is_permission = (event_name == "PermissionRequest"
+                         or (event_name == "PreToolUse"
+                             and str(_get(payload, "tool_name", "toolName") or "") == "AskUserQuestion")
+                         or (event_name == "Notification"
+                             and str(_get(payload, "notification_type", "notificationType") or "").lower()
+                                 in ("idle_prompt", "elicitation_dialog", "agent_needs_input")))
         return session_id, is_permission
+
+    def _merge_usage(self, task: dict, payload: dict) -> bool:
+        """把单条 hook payload 的 token/cached/output 累加到 task.tokenUsage 与全局 usage_snapshot。
+        返回：相对 task.tokenUsage 是否有「显著变化」（需要立即广播）。
+
+        兼容字段：
+          - info.total_token_usage / total_token_usage （Claude Code / Trae CN 的标准结构）
+          - info.tokenUsage / tokenUsage / usage （Codex rollout 已经直接走 apply_rollout_signals，
+            这里仅作为额外兜底。）
+        """
+        def _i(v):
+            try:
+                return int(v)
+            except Exception:
+                return 0
+        total_blob = None
+        if isinstance(payload.get("info"), dict) and isinstance(payload["info"].get("total_token_usage"), dict):
+            total_blob = payload["info"]["total_token_usage"]
+        elif isinstance(payload.get("total_token_usage"), dict):
+            total_blob = payload["total_token_usage"]
+        if not isinstance(total_blob, dict):
+            # 兜底：若 payload 直接就是扁平 token 字段（{input_tokens,cached_input_tokens,…}）
+            flat = {k: payload.get(k) for k in ("input_tokens", "cached_input_tokens",
+                                                 "cache_read_input_tokens", "output_tokens",
+                                                 "reasoning_output_tokens", "total_tokens")}
+            if any(v is not None for v in flat.values()):
+                total_blob = payload
+        if not isinstance(total_blob, dict):
+            return False
+        inp = _i(total_blob.get("input_tokens") or total_blob.get("input"))
+        cached = max(0, min(inp, _i(total_blob.get("cached_input_tokens")
+                                   or total_blob.get("cache_read_input_tokens")
+                                   or total_blob.get("cached")
+                                   or total_blob.get("cachedInput"))))
+        out = _i(total_blob.get("output_tokens") or total_blob.get("output"))
+        reasoning = _i(total_blob.get("reasoning_output_tokens")
+                       or total_blob.get("reasoning")
+                       or total_blob.get("reasoningOutput"))
+        total = _i(total_blob.get("total_tokens") or total_blob.get("total")) or max(1, inp + out)
+        tu = task.get("tokenUsage")
+        if not isinstance(tu, dict):
+            tu = {"input": 0, "cached": 0, "output": 0, "reasoning": 0, "total": 0}
+            task["tokenUsage"] = tu
+        # 增量：Claude Code / Trae 常以「累计 session 总数」发送，我们去重取 max
+        before = (tu.get("input"), tu.get("cached"), tu.get("output"), tu.get("reasoning"), tu.get("total"))
+        tu["input"] = max(_i(tu.get("input")), inp)
+        tu["cached"] = max(_i(tu.get("cached")), cached)
+        tu["output"] = max(_i(tu.get("output")), out)
+        tu["reasoning"] = max(_i(tu.get("reasoning")), reasoning)
+        tu["total"] = max(_i(tu.get("total")), total)
+        after = (tu["input"], tu["cached"], tu["output"], tu["reasoning"], tu["total"])
+        usage_changed = before != after
+        # 全局 usage_snapshot：所有 task 累加，字段结构与 CodexUsageLoader 输出一致
+        snap = {"input": 0, "cached": 0, "output": 0, "reasoning": 0, "total": 0,
+                "updatedAt": int(time.time() * 1000)}
+        for t in self.tasks.values():
+            u = t.get("tokenUsage")
+            if not isinstance(u, dict):
+                continue
+            for k in ("input", "cached", "output", "reasoning", "total"):
+                snap[k] += _i(u.get(k))
+        before_snap = None
+        if isinstance(self.usage_snapshot, dict):
+            before_snap = {k: self.usage_snapshot.get(k) for k in snap}
+        self.usage_snapshot = snap
+        if before_snap is None:
+            return usage_changed
+        snap_changed = any(before_snap.get(k) != snap[k] for k in snap)
+        return usage_changed or snap_changed
 
     @staticmethod
     def _project_name_from(payload: dict) -> str:
@@ -941,8 +1081,10 @@ class VibeRemoteServer:
                 task["capabilities"] = ["interrupt"]
         elif action == "answer":
             # 手机端回答 agent 等待中的问题（waitingAnswer）：
-            # 记录答案文本，解除等待态让 agent 继续；若该等待仍挂着
-            # PermissionRequest 的 hook socket（非工具类权限），顺带放行。
+            #  1) 若挂着 PermissionRequest / AskUserQuestion (PreToolUse) / Notification(idle_prompt)
+            #     的 hook socket，把回答文本编码成 hook stdout（按 Claude Code hooks 协议：
+            #     hookSpecificOutput.updatedInput.answers + 纯文本 additionalContext）。
+            #  2) 记录 task 元数据，便于回显。
             text = str(value or "").strip()
             if text:
                 task["answerText"] = text[:1000]
@@ -950,7 +1092,12 @@ class VibeRemoteServer:
             sock = self._pending_permission.get(task_id)
             if sock is not None:
                 try:
-                    resp = self._encode_permission_response(task["source"], "approve")
+                    resp = self._encode_permission_response(
+                        task["source"],
+                        "approve",
+                        task=task,
+                        answer_text=text or None,
+                    )
                     sock.sendall(resp)
                 except Exception as e:
                     LOG.warning("hook answer response write fail: %s", e)
@@ -963,6 +1110,7 @@ class VibeRemoteServer:
             task["activity"] = "thinking"
             task["completedAt"] = None
             task.pop("pendingKind", None)
+            task.pop("pendingHookEvent", None)
             task["capabilities"] = ["interrupt"]
             if text:
                 self._push_rec(f"已回复 {str(task.get('title') or task.get('projectName') or '')[:24]}：{text[:40]}")
@@ -987,7 +1135,11 @@ class VibeRemoteServer:
             sock = self._pending_permission.pop(task_id, None)
             if sock is not None:
                 try:
-                    sock.sendall(self._encode_permission_response(str(task.get("source") or "codex"), "approve"))
+                    sock.sendall(
+                        self._encode_permission_response(
+                            str(task.get("source") or "codex"), "approve"
+                        )
+                    )
                 except Exception as e:
                     LOG.warning("hook delete release write fail: %s", e)
                 try:
@@ -1005,27 +1157,103 @@ class VibeRemoteServer:
         self.broadcast_tasks()
 
     @staticmethod
-    def _encode_permission_response(source: str, decision: str) -> bytes:
-        """与 ClaudeHookOutput / CodexHookOutput 字节级对齐。"""
+    def _encode_permission_response(source: str, decision: str,
+                                    task: dict | None = None,
+                                    answer_text: str | None = None) -> bytes:
+        """与 ClaudeHookOutput / CodexHookOutput 字节级对齐。
+
+        与 agent_hook.py FAMILY 对齐。
+        当 task 挂起的事件是 PreToolUse(AskUserQuestion) 或 Notification(idle_prompt)
+        并且手机端给出 answer_text 时，把回答按协议写入 updatedInput.answers / additionalContext
+        以便终端 agent 能看见（至少 hook stdout 里会出现回答文本）。
+        """
         allow = decision == "approve"
-        if source == "claude":
-            obj = {
-                "continue": True,
-                "suppressOutput": True,
-                "hookSpecificOutput": {
-                    "hookEventName": "PermissionRequest",
-                    "decision": {"behavior": "allow" if allow else "deny"},
-                },
+        claude_family = ("claude",)
+
+        pending_event = None
+        ask_input: dict | None = None
+        if isinstance(task, dict):
+            pending_event = str(task.get("pendingHookEvent") or task.get("pending_event") or "")
+            ask_input = task.get("lastAskUserQuestionInput") if isinstance(
+                task.get("lastAskUserQuestionInput"), dict) else None
+
+        answers: dict[str, str] = {}
+        if answer_text:
+            # 对 AskUserQuestion：尝试按 tool_input.questions 的顺序填 answers。
+            # Claude Code AskUserQuestion 协议：
+            #   tool_input = {"questions":[{"question":"...","header":"..","options":[..]}..]}
+            #   updatedInput = {"answers": {"question 1": "answer 1"}}
+            #   （也接受 answers 数组；这里优先使用字典以避免顺序问题。）
+            if isinstance(ask_input, dict) and isinstance(ask_input.get("questions"), list):
+                qs = ask_input["questions"]
+                if qs:
+                    first = qs[0]
+                    key = ""
+                    if isinstance(first, dict):
+                        key = (str(first.get("question") or first.get("header")
+                                 or first.get("key") or first.get("id") or "").strip())
+                    elif isinstance(first, str):
+                        key = first.strip()
+                    if not key:
+                        key = "0"
+                    answers[key] = answer_text
+            if not answers:
+                # 非 AskUserQuestion：比如 Notification(idle_prompt)，写默认键 "0" + "text" + "answer"
+                answers = {"0": answer_text, "answer": answer_text, "text": answer_text}
+
+        # ---- 决策主体 ----
+        behavior = "allow" if allow else "deny"
+        # hookEventName 必须和接收端一致，否则 Claude Code 会报 unknown event / 丢弃决策：
+        #   PermissionRequest 事件 → hookEventName = PermissionRequest
+        #   PreToolUse 挂起（AskUserQuestion） → PreToolUse
+        #   Notification 挂起（idle_prompt 等） → 通知没有真正的「permission output」字段，
+        #       我们仍然写 JSON，保证至少 agent_hook 把它打印到 stdout 时终端能看到回答文本。
+        if pending_event in ("PreToolUse", "PermissionRequest", "Notification"):
+            target_event_name = pending_event
+        else:
+            target_event_name = "PermissionRequest"
+
+        if source in claude_family:
+            hso: dict = {
+                "hookEventName": target_event_name,
+                "decision": {"behavior": behavior},
             }
-        else:  # codex
-            obj = {
-                "continue": True,
-                "hookSpecificOutput": {
-                    "hookEventName": "PermissionRequest",
-                    "decision": "allow" if allow else "deny",
-                },
+        else:  # codex_family: codex
+            hso = {
+                "hookEventName": target_event_name,
+                "decision": behavior,
             }
-        return (json.dumps(obj, ensure_ascii=False) + "\n").encode("utf-8")
+        obj: dict = {
+            "continue": True,
+            "suppressOutput": False,  # 不要吞掉 additionalContext 文本，便于终端看到回答
+            "hookSpecificOutput": hso,
+        }
+        if answer_text:
+            # updatedInput.answers：Claude Code / Trae 对 PreToolUse AskUserQuestion 的标准回写字段
+            if pending_event in ("PreToolUse", "PermissionRequest"):
+                hso.setdefault("updatedInput", {})
+                if isinstance(hso.get("updatedInput"), dict):
+                    # 如果 updatedInput 本身就有 answers（工具原本给的默认），按问题键覆盖
+                    prev = hso["updatedInput"].get("answers")
+                    if isinstance(prev, dict):
+                        prev.update(answers)
+                    elif isinstance(prev, list):
+                        prev.append(answer_text)
+                    else:
+                        hso["updatedInput"]["answers"] = dict(answers)
+            # additionalContext：所有事件都写一份，确保终端里哪怕只解析纯文本也能看到
+            obj["additionalContext"] = (
+                f"\n[来自手机回答]\n{answer_text}\n"
+            )
+
+        lines = [json.dumps(obj, ensure_ascii=False)]
+        if answer_text:
+            # 终端兼容性兜底：额外再写两行纯文本，让用户在命令行里肉眼一定可见回答
+            lines.append("")
+            lines.append("=== 手机端已发送回答 ===")
+            lines.append(answer_text)
+            lines.append("========================")
+        return ("\n".join(lines) + "\n").encode("utf-8")
 
     def broadcast_tasks(self) -> None:
         """把当前所有 task snapshot（按 AgentPager EffectivePriority 排序）+ 用量广播到所有已授权端。"""
@@ -1300,13 +1528,22 @@ class VibeRemoteServer:
                 old = self._pending_permission.pop(session_id, None)
                 if old:
                     try:
+                        old.shutdown(socket.SHUT_RDWR)
+                    except Exception:
+                        pass
+                    try:
                         old.close()
                     except Exception:
                         pass
-                # 用同步 socket 存储（task_control 在 event loop 里需要同步 write）
-                # 注意：asyncio StreamWriter sock 是同一个，可用 raw fileno 做同步 socket
+                # 用同步 socket 存储（task_control 在 event loop 里需要同步 write）。
+                # 关键：必须用 sock.dup() 创建「独立 fd 引用」的新 socket，
+                # 不能用 socket.fromfd(sock.fileno(), ...) 因为后者共享原始 fd，
+                # 一旦 task_control 这边 close() 会把 StreamWriter 的 fd 也关死，
+                # 导致原始 TCP 另一端（agent_hook.py / trigger 线程）在 writer 关闭前
+                # 就收不到所有字节。
                 try:
-                    dup = socket.fromfd(sock.fileno(), sock.family, sock.type, sock.proto)
+                    dup = sock.dup()
+                    dup.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
                     self._pending_permission[session_id] = dup
                 except Exception as e:
                     LOG.warning("hook socket dup fail: %s", e)
@@ -1318,7 +1555,7 @@ class VibeRemoteServer:
                 deadline = time.time() + 86400.0
                 try:
                     while time.time() < deadline:
-                        await asyncio.sleep(0.5)
+                        await asyncio.sleep(0.2)
                         cur = self.tasks.get(session_id)
                         if cur is None:
                             break
@@ -1328,12 +1565,35 @@ class VibeRemoteServer:
                     pass
                 finally:
                     sock0 = self._pending_permission.pop(session_id, None)
-                    if sock0:
+                    if sock0 is not None:
+                        # 超时 / 漏网情况：给一个默认 allow 决策，避免 agent 卡死
+                        try:
+                            sink_resp = VibeRemoteServer._encode_permission_response(
+                                str((self.tasks.get(session_id) or {}).get("source") or "claude"),
+                                "approve",
+                            )
+                            try:
+                                sock0.sendall(sink_resp)
+                            except Exception:
+                                pass
+                        except Exception:
+                            pass
+                        try:
+                            sock0.shutdown(socket.SHUT_RDWR)
+                        except Exception:
+                            pass
                         try:
                             sock0.close()
                         except Exception:
                             pass
                 try:
+                    # 对原始 writer：等一个短 drain 周期确保本端所有缓冲都对端可读，
+                    # 然后正常关闭，触发对端 recv 返回 0 结束收包循环。
+                    await asyncio.sleep(0.05)
+                    try:
+                        await writer.drain()
+                    except Exception:
+                        pass
                     writer.close()
                     await writer.wait_closed()
                 except Exception:
@@ -1516,8 +1776,8 @@ class VibeRemoteServer:
                 "  Vibe Remote desktop server is running",
                 f"  Pair console : http://localhost:{self.port}/pair/console",
                 f"  Hook TCP (Claude/Codex) : 127.0.0.1:{self.hook_port}",
-                "  Hook install : vibe_agent_hook --install both",
-                "  Hook uninstall: vibe_agent_hook --uninstall both",
+                "  Hook install : vibe_agent_hook --install all    (Claude/Codex 两家全装)",
+                "  Hook uninstall: vibe_agent_hook --uninstall all  (两家全卸；可选单个: claude/codex)",
                 "  Local IPs (WiFi / USB-tether reachable):",
             ]
             for ip in all_local_ips():
@@ -1542,6 +1802,7 @@ def load_config(path: Path) -> dict:
 def main() -> None:
     parser = argparse.ArgumentParser(description="Vibe Remote desktop server")
     parser.add_argument("--port", type=int, default=None, help="listen port (default 8765 or read from config)")
+    parser.add_argument("--hook-port", type=int, default=None, help="hook TCP port (default 49361 or read from config; env VIBE_HOOK_PORT 同步生效)")
     parser.add_argument("--no-browser", action="store_true", help="do not auto-open the pair console")
     parser.add_argument("--gui", action="store_true", help="run in GUI mode (pywebview window, close to exit)")
     parser.add_argument("--verbose", action="store_true", help="enable debug logging")
@@ -1576,6 +1837,13 @@ def main() -> None:
         config = {}
     if args.port:
         config["port"] = args.port
+    if args.hook_port:
+        config["hook_port"] = args.hook_port
+    elif "hook_port" not in config and os.environ.get("VIBE_HOOK_PORT"):
+        try:
+            config["hook_port"] = int(os.environ["VIBE_HOOK_PORT"])
+        except ValueError:
+            pass
 
     try:
         # GUI 模式：不自动开浏览器（由 pywebview 窗口替代）

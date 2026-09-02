@@ -140,6 +140,10 @@ class RemoteClient(
         sendJson(JSONObject().put("type", "get_keymap"))
     }
 
+    fun getTasks() {
+        sendJson(JSONObject().put("type", "get_tasks"))
+    }
+
     fun keyTap(id: String) {
         sendJson(JSONObject().put("type", "key").put("action", "tap").put("key", id))
     }
@@ -270,6 +274,7 @@ class RemoteClient(
                 val mc = m.optInt("max_clients", 2)
                 if (mc >= 1) maxClients.value = mc
                 getKeymap()
+                getTasks()
                 onEvent(WsEvent.Paired)
             }
             "pair_info" -> {
