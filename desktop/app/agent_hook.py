@@ -300,8 +300,8 @@ CLAUDE_EVENTS: list[tuple[str, str | None, int | None]] = [
     ("PostToolUseFailure", "*", None),
     ("PermissionDenied", "*", None),
     ("PreCompact", None, None),
-    # Token 用量事件（Claude Code / Trae CN 内部推送）：累加 tokenUsage 并广播到手机端
-    ("token_count", None, None),
+    # 注意：token_count 事件仅 Codex 支持（CODEX_EVENTS），Claude Code 不支持，
+    # 若加入 CLAUDE_EVENTS 会导致 Claude Code 启动时报 "Unknown hook event" 警告。
 ]
 
 CODEX_EVENTS: list[tuple[str, str | None, int]] = [
@@ -556,6 +556,87 @@ def cmd_uninstall(target: str) -> int:
     if "codex" in picked:
         _uninstall_one("Codex", uninstall_codex)
     return 0
+
+
+def list_backups(target: str) -> list[dict]:
+    """列出指定 source 的 hook 备份文件。
+
+    Args:
+        target: "claude" 或 "codex"
+    Returns:
+        [{name, path, size, mtime, mtime_display}, ...]，按时间倒序（最新在前）
+    """
+    if target == "claude":
+        path = _claude_settings_path()
+        prefix = "settings.json.vibe-hook-backup-"
+    elif target == "codex":
+        path = _codex_home() / "hooks.json"
+        prefix = "hooks.json.vibe-hook-backup-"
+    else:
+        return []
+
+    backups: list[dict] = []
+    if not path.parent.exists():
+        return backups
+
+    for f in path.parent.iterdir():
+        if not f.is_file():
+            continue
+        if not f.name.startswith(prefix):
+            continue
+        suffix = f.name[len(prefix):]
+        stamp = 0
+        try:
+            stamp_str = suffix.split("-")[0]
+            stamp = int(stamp_str)
+        except (ValueError, IndexError):
+            stamp = 0
+        try:
+            stat = f.stat()
+        except OSError:
+            continue
+        mtime = stamp or int(stat.st_mtime)
+        backups.append({
+            "name": f.name,
+            "path": str(f),
+            "size": stat.st_size,
+            "mtime": mtime,
+            "mtime_display": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(mtime)),
+        })
+
+    backups.sort(key=lambda b: b["mtime"], reverse=True)
+    return backups
+
+
+def delete_backup(target: str, name: str) -> bool:
+    """删除指定 source 的某个 hook 备份文件。
+
+    Args:
+        target: "claude" 或 "codex"
+        name: 备份文件名（仅文件名，不含路径）
+    Returns:
+        True 删除成功，False 失败
+    """
+    if target == "claude":
+        path = _claude_settings_path()
+        prefix = "settings.json.vibe-hook-backup-"
+    elif target == "codex":
+        path = _codex_home() / "hooks.json"
+        prefix = "hooks.json.vibe-hook-backup-"
+    else:
+        return False
+
+    if not name.startswith(prefix):
+        return False
+
+    target_path = path.parent / name
+    if not target_path.exists():
+        return False
+    try:
+        target_path.unlink()
+        return True
+    except Exception:
+        return False
 
 
 if __name__ == "__main__":

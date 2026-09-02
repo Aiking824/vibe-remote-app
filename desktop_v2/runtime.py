@@ -92,6 +92,7 @@ class RuntimeService(QObject):
     claude_hook_status_changed = Signal(str)
     codex_last_event_changed = Signal(str)
     claude_last_event_changed = Signal(str)
+    backups_changed = Signal(str)  # source — 安装/卸载/删除备份后触发，UI 据此刷新备份列表
 
     def __init__(self, config_path: Optional[Path] = None, parent: QObject | None = None) -> None:
         super().__init__(parent)
@@ -306,7 +307,11 @@ class RuntimeService(QObject):
         if not _HAS_HOOK_INSTALLER:
             return "agent_hook 不可用"
         try:
-            rc = cmd_install(source)
+            # 修复：cmd_install 需要 (target, exe) 两个参数；
+            # 传 None 让 _default_hook_exe 自动解析 vibe_agent_hook.exe 路径。
+            rc = cmd_install(source, None)
+            # 通知 UI 刷新备份列表
+            self.backups_changed.emit(source)
             return "已安装" if rc == 0 else f"安装失败 rc={rc}"
         except Exception as exc:
             return f"安装失败：{exc}"
@@ -317,9 +322,38 @@ class RuntimeService(QObject):
             return "agent_hook 不可用"
         try:
             rc = cmd_uninstall(source)
+            # 通知 UI 刷新备份列表
+            self.backups_changed.emit(source)
             return "已卸载" if rc == 0 else f"卸载失败 rc={rc}"
         except Exception as exc:
             return f"卸载失败：{exc}"
+
+    @Slot(str, result=list)
+    def list_backups(self, source: str) -> list:
+        """返回指定 source 的 hook 备份列表（按时间倒序）。"""
+        if not _HAS_HOOK_INSTALLER:
+            return []
+        try:
+            from agent_hook import list_backups as _list_backups  # type: ignore
+            return _list_backups(source)
+        except Exception as exc:
+            LOG.exception("list_backups failed: %s", exc)
+            return []
+
+    @Slot(str, str, result=bool)
+    def delete_backup(self, source: str, name: str) -> bool:
+        """删除指定 source 的某个 hook 备份文件。"""
+        if not _HAS_HOOK_INSTALLER:
+            return False
+        try:
+            from agent_hook import delete_backup as _delete_backup  # type: ignore
+            ok = _delete_backup(source, name)
+            if ok:
+                self.backups_changed.emit(source)
+            return ok
+        except Exception as exc:
+            LOG.exception("delete_backup failed: %s", exc)
+            return False
 
     @Slot()
     def push_keymap(self) -> None:

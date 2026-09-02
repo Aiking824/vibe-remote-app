@@ -188,6 +188,23 @@ def main(argv: list[str] | None = None) -> int:
     window.codex_hook_page.uninstall_requested.connect(lambda: runtime.uninstall_hook("codex"))
     window.claude_hook_page.install_requested.connect(lambda: runtime.install_hook("claude"))
     window.claude_hook_page.uninstall_requested.connect(lambda: runtime.uninstall_hook("claude"))
+    # 备份管理：删除按钮 + backups_changed 信号刷新
+    window.codex_hook_page.del_backup_requested.connect(
+        lambda name: runtime.delete_backup("codex", name)
+    )
+    window.claude_hook_page.del_backup_requested.connect(
+        lambda name: runtime.delete_backup("claude", name)
+    )
+
+    def _refresh_backups(source: str) -> None:
+        """从 runtime 拉取备份列表并刷新对应 page。"""
+        backups = runtime.list_backups(source)
+        if source == "codex":
+            window.codex_hook_page.set_backups(backups)
+        elif source == "claude":
+            window.claude_hook_page.set_backups(backups)
+
+    runtime.backups_changed.connect(_refresh_backups)
     window.keymap_page.push_requested.connect(runtime.push_keymap)
     window.keymap_page.save_requested.connect(
         lambda keys: window.set_diag(runtime.save_keymap(keys))
@@ -205,6 +222,10 @@ def main(argv: list[str] | None = None) -> int:
 
     # 启动后台服务（状态由 runtime 通过信号驱动，避免覆盖错误状态）
     runtime.start()
+
+    # 初始刷新 Codex/Claude 的 Hook 备份列表
+    _refresh_backups("codex")
+    _refresh_backups("claude")
 
     if not background:
         window.show()

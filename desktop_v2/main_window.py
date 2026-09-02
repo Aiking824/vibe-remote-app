@@ -26,6 +26,8 @@ from PySide6.QtWidgets import (
     QGridLayout,
     QHBoxLayout,
     QLabel,
+    QListWidget,
+    QListWidgetItem,
     QMainWindow,
     QPushButton,
     QSizePolicy,
@@ -202,6 +204,7 @@ class _HookPage(QWidget):
 
     install_requested = Signal()
     uninstall_requested = Signal()
+    del_backup_requested = Signal(str)  # 备份文件名
 
     def __init__(self, accent: str, title: str, hint: str, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -256,6 +259,26 @@ class _HookPage(QWidget):
         btn_row.addStretch()
         card.addLayout(btn_row)
 
+        # ===== Hook 备份列表 =====
+        backup_title = QLabel("Hook 备份（每次安装/修复自动保留上一版本）")
+        backup_title.setObjectName("muted")
+        card.addWidget(backup_title)
+        self.backup_list = QListWidget()
+        self.backup_list.setMaximumHeight(120)
+        self.backup_list.itemSelectionChanged.connect(self._on_backup_selection_changed)
+        card.addWidget(self.backup_list)
+        backup_row = QHBoxLayout()
+        self.del_backup_btn = QPushButton("删除选中")
+        self.del_backup_btn.setObjectName("danger")
+        self.del_backup_btn.setEnabled(False)
+        self.del_backup_btn.clicked.connect(self._on_del_backup)
+        backup_row.addWidget(self.del_backup_btn)
+        backup_row.addStretch()
+        self.backup_count_label = QLabel("（0 个备份）")
+        self.backup_count_label.setObjectName("muted")
+        backup_row.addWidget(self.backup_count_label)
+        card.addLayout(backup_row)
+
         root.addWidget(card)
 
         footer = QLabel("Bridge 不在线时 Hook 自动放行，不会阻塞 Agent。")
@@ -269,6 +292,40 @@ class _HookPage(QWidget):
 
     def set_last_event(self, text: str) -> None:
         self.last_label.setText(text)
+
+    def set_backups(self, backups: list) -> None:
+        """接收备份列表并刷新 UI。
+
+        backups: [{name, path, size, mtime, mtime_display}, ...]
+        """
+        self.backup_list.clear()
+        for b in backups:
+            size_b = b.get("size", 0)
+            if size_b < 1024:
+                size_str = f"{size_b} B"
+            elif size_b < 1024 * 1024:
+                size_str = f"{size_b/1024:.1f} KB"
+            else:
+                size_str = f"{size_b/1024/1024:.2f} MB"
+            text = f"{b.get('mtime_display', '?')}  ({size_str})"
+            item = QListWidgetItem(text)
+            item.setData(Qt.UserRole, b.get("name", ""))
+            self.backup_list.addItem(item)
+        self.backup_count_label.setText(f"（{len(backups)} 个备份）")
+        self._on_backup_selection_changed()
+
+    def _on_backup_selection_changed(self) -> None:
+        """根据是否选中项控制删除按钮启用状态。"""
+        self.del_backup_btn.setEnabled(self.backup_list.currentItem() is not None)
+
+    def _on_del_backup(self) -> None:
+        """点击删除按钮：emit 备份文件名。"""
+        item = self.backup_list.currentItem()
+        if item is None:
+            return
+        name = item.data(Qt.UserRole)
+        if name:
+            self.del_backup_requested.emit(name)
 
 
 class CodexHookPage(_HookPage):
