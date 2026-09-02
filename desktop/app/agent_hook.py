@@ -402,7 +402,7 @@ def install_claude(exe: str | None) -> tuple[bool, str | None]:
         hooks = {}
     # 路径无空格时不加引号：部分 agent 对带引号命令的解析不一致，
     # 整串含引号被当作可执行文件名时 CreateProcess 会报 267 目录名无效。
-    command = f"{Path(exe).as_posix()} --hook --source claude"
+    command = f'"{exe}" --hook --source claude'
     for name, matcher, timeout in CLAUDE_EVENTS:
         groups = hooks.get(name)
         if not isinstance(groups, list):
@@ -468,7 +468,7 @@ def install_codex(exe: str | None) -> tuple[bool, str | None]:
     hooks = root.get("hooks")
     if not isinstance(hooks, dict):
         hooks = {}
-    command = f"{Path(exe).as_posix()} --hook --source codex"
+    command = f'"{exe}" --hook --source codex'
     for name, matcher, timeout in CODEX_EVENTS:
         groups = hooks.get(name)
         if not isinstance(groups, list):
