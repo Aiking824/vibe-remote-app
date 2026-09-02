@@ -1,4 +1,4 @@
-﻿package com.viberemote.mobile.ui
+package com.viberemote.mobile.ui
 
 import android.content.res.Configuration
 import androidx.compose.animation.core.RepeatMode
@@ -26,6 +26,7 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -87,6 +88,7 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -113,6 +115,8 @@ import com.viberemote.mobile.net.AgentStatus
 import com.viberemote.mobile.net.KeyDef
 import com.viberemote.mobile.net.PeerInfo
 import com.viberemote.mobile.net.RemoteClient
+import com.viberemote.mobile.net.TaskSnapshot as NetTaskSnapshot
+import com.viberemote.mobile.net.TokenUsage
 import com.viberemote.mobile.AgentGridUiState
 import com.viberemote.mobile.ScreenBrightnessPolicy
 import com.viberemote.mobile.domain.ControlAction
@@ -262,13 +266,22 @@ fun RemoteScreen(
     val clients by client.clients.collectAsState()
     val peers by client.peers.collectAsState()
     val maxClients by client.maxClients.collectAsState()
+    val tasks by client.tasks.collectAsState()
     val u = ui()
     var page by remember { mutableStateOf(Page.PAD) }
+    val landscape = LocalConfiguration.current.orientation == Configuration.ORIENTATION_LANDSCAPE
+    val agentLandscape = page == Page.AGENT && landscape
+
+    // 首界面 Agent 状态卡的"选中项目"（跨 PAD/MOUSE/HOT 共享同一个选择）
+    //   null = 自动（展示全量 tasks 里最活跃的那条任务）
+    //   非空 = 仅在该项目下选最活跃任务；未命中该项目任务，显示"该项目暂无运行任务"兜底
+    var selectedProject by rememberSaveable { mutableStateOf<String?>(null) }
 
     Scaffold(
         containerColor = u.bg,
         bottomBar = {
-            if (paired) {
+            // Agent 页横屏：只保留主界面，隐藏底部导航
+            if (paired && !agentLandscape) {
                 NavigationBar(containerColor = u.panel, tonalElevation = 0.dp) {
                     NavigationBarItem(
                         selected = page == Page.PAD,
@@ -330,40 +343,43 @@ fun RemoteScreen(
             Column(
                 Modifier
                     .fillMaxSize()
-                    .padding(horizontal = 12.dp, vertical = 8.dp),
+                    .padding(horizontal = if (agentLandscape) 0.dp else 12.dp, vertical = if (agentLandscape) 0.dp else 8.dp),
             ) {
-                // —— 顶栏 · 第 1 行：标题 + 设备入口 ——
-                var showDeviceDialog by remember { mutableStateOf(false) }
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text("Vibe Remote", color = u.fg, fontSize = 18.sp, fontWeight = FontWeight.Bold)
-                    Spacer(Modifier.weight(1f))
-                    if (paired) {
-                        DeviceChip(
-                            count = clients,
-                            max = maxClients,
-                            onClick = { showDeviceDialog = true },
-                        )
-                    } else {
-                        Text("设备 0/0", color = u.sub, fontSize = 11.sp)
+                // Agent 横屏：隐藏顶部标题/设备/连接状态，仅保留主内容
+                if (!agentLandscape) {
+                    // —— 顶栏 · 第 1 行：标题 + 设备入口 ——
+                    var showDeviceDialog by remember { mutableStateOf(false) }
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text("Vibe Remote", color = u.fg, fontSize = 18.sp, fontWeight = FontWeight.Bold)
+                        Spacer(Modifier.weight(1f))
+                        if (paired) {
+                            DeviceChip(
+                                count = clients,
+                                max = maxClients,
+                                onClick = { showDeviceDialog = true },
+                            )
+                        } else {
+                            Text("设备 0/0", color = u.sub, fontSize = 11.sp)
+                        }
                     }
-                }
-                if (paired && showDeviceDialog) {
-                    DeviceDialog(
-                        peers = peers,
-                        onReconnect = { onConnect() },
-                        onDelete = { pid -> client.deletePeer(pid) },
-                        onDisconnect = { client.disconnect() },
-                        onDismiss = { showDeviceDialog = false },
+                    if (paired && showDeviceDialog) {
+                        DeviceDialog(
+                            peers = peers,
+                            onReconnect = { onConnect() },
+                            onDelete = { pid -> client.deletePeer(pid) },
+                            onDisconnect = { client.disconnect() },
+                            onDismiss = { showDeviceDialog = false },
+                        )
+                    }
+                    Spacer(Modifier.height(6.dp))
+                    // —— 顶栏 · 第 2 行：连接状态（独立整行，避免遮挡） ——
+                    ConnPill(
+                        text = conn,
+                        ok = paired,
+                        modifier = Modifier.fillMaxWidth(),
                     )
+                    Spacer(Modifier.height(8.dp))
                 }
-                Spacer(Modifier.height(6.dp))
-                // —— 顶栏 · 第 2 行：连接状态（独立整行，避免遮挡） ——
-                ConnPill(
-                    text = conn,
-                    ok = paired,
-                    modifier = Modifier.fillMaxWidth(),
-                )
-                Spacer(Modifier.height(8.dp))
 
                 if (!paired) {
                     ConnectPage(
@@ -378,12 +394,28 @@ fun RemoteScreen(
                             client = client,
                             keys = keymap,
                             status = c,
+                            tasks = tasks,
+                            selectedProject = selectedProject,
+                            onSelectProject = { selectedProject = it },
                             phase = phase,
                             sessionMsg = sessionMsg,
                             onNeedsMic = onNeedsMic,
                         )
-                        Page.MOUSE -> MousePage(client)
-                        Page.HOT -> HotPage(client, keys = keymap)
+                        Page.MOUSE -> MousePage(
+                            client,
+                            status = c,
+                            tasks = tasks,
+                            selectedProject = selectedProject,
+                            onSelectProject = { selectedProject = it },
+                        )
+                        Page.HOT -> HotPage(
+                            client,
+                            keys = keymap,
+                            status = c,
+                            tasks = tasks,
+                            selectedProject = selectedProject,
+                            onSelectProject = { selectedProject = it },
+                        )
                         Page.AGENT -> AgentPage(client = client, onAgentBrightness = onAgentBrightness)
                     }
                 }
@@ -580,6 +612,9 @@ private fun PadPage(
     client: RemoteClient,
     keys: List<KeyDef>,
     status: AgentStatus,
+    tasks: List<NetTaskSnapshot>,
+    selectedProject: String?,
+    onSelectProject: (String?) -> Unit,
     phase: String,
     sessionMsg: String,
     onNeedsMic: () -> Unit,
@@ -597,7 +632,7 @@ private fun PadPage(
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Column(Modifier.weight(1f).fillMaxHeight(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                StatusCard(status, Modifier.fillMaxWidth())
+                StatusCard(status, tasks, selectedProject, onSelectProject, Modifier.fillMaxWidth())
                 VoiceBar(client, phase, sessionMsg, onNeedsMic, Modifier.fillMaxWidth())
             }
             Column(
@@ -616,7 +651,7 @@ private fun PadPage(
             verticalArrangement = Arrangement.SpaceBetween,
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
-            StatusCard(status, Modifier.fillMaxWidth())
+            StatusCard(status, tasks, selectedProject, onSelectProject, Modifier.fillMaxWidth())
             DPad(dpad, client, k("enter"))
             FnRow(fn, client)
             NumRow(num, client)
@@ -746,12 +781,21 @@ private fun NumRow(num: List<KeyDef>, client: RemoteClient) {
 
 // ================= 触控板页 =================
 @Composable
-private fun MousePage(client: RemoteClient) {
+private fun MousePage(
+    client: RemoteClient,
+    status: AgentStatus,
+    tasks: List<NetTaskSnapshot>,
+    selectedProject: String?,
+    onSelectProject: (String?) -> Unit,
+) {
     val landscape = LocalConfiguration.current.orientation == Configuration.ORIENTATION_LANDSCAPE
 
     if (landscape) {
         Row(Modifier.fillMaxSize(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-            TouchArea(client, Modifier.weight(1f).fillMaxHeight())
+            Column(Modifier.weight(1f).fillMaxHeight(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                StatusCard(status, tasks, selectedProject, onSelectProject, Modifier.fillMaxWidth())
+                TouchArea(client, Modifier.weight(1f).fillMaxWidth())
+            }
             Column(
                 Modifier.width(140.dp).fillMaxHeight(),
                 verticalArrangement = Arrangement.spacedBy(8.dp),
@@ -765,6 +809,8 @@ private fun MousePage(client: RemoteClient) {
         }
     } else {
         Column(Modifier.fillMaxSize()) {
+            StatusCard(status, tasks, selectedProject, onSelectProject, Modifier.fillMaxWidth())
+            Spacer(Modifier.height(8.dp))
             TouchArea(client, Modifier.weight(1f).fillMaxWidth())
             Spacer(Modifier.height(10.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -896,7 +942,14 @@ private fun ScrollButton(client: RemoteClient, dy: Int, label: String, modifier:
 
 // ================= 快捷键页（复制 / 剪切 / 粘贴 + Win+D / Alt+Tab / Win+L 等） =================
 @Composable
-private fun HotPage(client: RemoteClient, keys: List<KeyDef>) {
+private fun HotPage(
+    client: RemoteClient,
+    keys: List<KeyDef>,
+    status: AgentStatus,
+    tasks: List<NetTaskSnapshot>,
+    selectedProject: String?,
+    onSelectProject: (String?) -> Unit,
+) {
     val u = ui()
     val clip = keys.filter { it.group == "clip" }
     val hot = keys.filter { it.group == "hot" }
@@ -925,6 +978,7 @@ private fun HotPage(client: RemoteClient, keys: List<KeyDef>) {
         Modifier.fillMaxSize(),
         verticalArrangement = Arrangement.spacedBy(10.dp),
     ) {
+        StatusCard(status, tasks, selectedProject, onSelectProject, Modifier.fillMaxWidth())
         Text(
             "电脑端常用快捷键（直接在电脑端执行）",
             color = u.fg, fontSize = 13.sp, fontWeight = FontWeight.SemiBold,
@@ -1284,18 +1338,64 @@ private fun AgentPage(
     )
 }
 
-/** Agent 状态卡（AgentPager 风格，用于首页其他页面的紧凑版） */
+/** Agent 状态卡（用户可选项目 + 高亮 + 选中项目下的当前运行状态 + 点击弹 Token 明细）
+ *
+ *  交互流程：
+ *    1. 点击卡片 → 先弹出项目选择器（全部项目分组 + "自动（最活跃）"项，当前选中项琥珀色高亮）
+ *    2. 选中某个项目 → 卡片只显示该项目下最活跃任务的运行状态、Harness 名、Token 明细
+ *    3. 在选择器里选"查看选中项目 Tokens" → 跳到选中项目的 Token 明细对话框
+ *    4. "清空选择"按钮 = 恢复自动模式（跨 Tab 共享选中项）
+ * */
 @Composable
-fun StatusCard(status: AgentStatus, modifier: Modifier = Modifier) {
+fun StatusCard(
+    status: AgentStatus,
+    tasks: List<NetTaskSnapshot>,
+    selectedProject: String?,
+    onSelectProject: (String?) -> Unit,
+    modifier: Modifier = Modifier,
+) {
     val u = ui()
-    val stateColor = stateColorOf(status.state)
-    val stateCn = stateCnOf(status.state)
-    val (mark, markColor) = sourceMark(status.source)
+
+    // 项目内的"最活跃任务"选择策略：attentionScore + updatedAt 倒序（同一个项目可能有多个 session）
+    fun pickTop(list: List<NetTaskSnapshot>): NetTaskSnapshot? = list.maxWithOrNull(
+        compareBy<NetTaskSnapshot> { it.attentionScore }
+            .thenByDescending { it.updatedAt }
+    )
+
+    val allProjects = remember(tasks) {
+        tasks.map { it.projectName.ifBlank { status.project.ifBlank { "(未命名项目)" } } }
+            .distinct().sorted()
+    }
+    val working: NetTaskSnapshot? = remember(tasks, selectedProject) {
+        when (val p = selectedProject) {
+            null -> pickTop(tasks)
+            else -> pickTop(tasks.filter {
+                (it.projectName.ifBlank { status.project.ifBlank { "(未命名项目)" } }) == p
+            })
+        }
+    }
+
+    val hasSelection = selectedProject != null
+    val displaySource = working?.source?.takeIf { it.isNotBlank() } ?: status.source
+    val displayProject = selectedProject ?: working?.projectName?.takeIf { it.isNotBlank() } ?: status.project
+    val displayLifecycle = working?.lifecycle ?: status.state
+    val displayTitle = working?.title?.takeIf { it.isNotBlank() } ?: working?.userPrompt
+        ?: working?.latestStep?.takeIf { it.isNotBlank() } ?: status.message
+
+    val stateColor = stateColorOf(displayLifecycle)
+    val stateCn = stateCnOf(displayLifecycle)
+    val (mark, markColor) = sourceMark(displaySource)
+
+    var showPicker by remember { mutableStateOf(false) }
+    var showTokenDialog by remember { mutableStateOf(false) }
 
     Column(
         modifier
-            .background(u.panel)
-            .border(1.dp, u.border)
+            .background(
+                if (hasSelection) AgColors.Amber.copy(alpha = 0.06f) else u.panel,
+            )
+            .border(1.dp, if (hasSelection) AgColors.Amber else u.border)
+            .clickable { showPicker = true }
             .padding(10.dp),
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -1312,7 +1412,10 @@ fun StatusCard(status: AgentStatus, modifier: Modifier = Modifier) {
             Column(Modifier.weight(1f)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(
-                        if (status.source.isBlank()) "Agent" else status.source,
+                        when {
+                            displaySource.isBlank() -> "Agent"
+                            else -> harnessDisplayName(displaySource)
+                        },
                         color = u.fg, fontSize = 13.sp, fontWeight = FontWeight.Bold,
                         maxLines = 1, overflow = TextOverflow.Ellipsis,
                     )
@@ -1329,21 +1432,355 @@ fun StatusCard(status: AgentStatus, modifier: Modifier = Modifier) {
                     }
                 }
                 Spacer(Modifier.height(2.dp))
-                Text(status.state.uppercase(), color = u.sub, fontSize = 9.sp, letterSpacing = 1.sp)
+                // 选中项目：项目名高亮为琥珀色 + "已选择"徽章
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    if (hasSelection) {
+                        Box(
+                            Modifier
+                                .background(AgColors.Amber.copy(alpha = 0.22f))
+                                .padding(horizontal = 4.dp, vertical = 0.dp),
+                        ) {
+                            Text("已选", color = AgColors.Amber, fontSize = 9.sp, fontWeight = FontWeight.Black)
+                        }
+                        Spacer(Modifier.width(4.dp))
+                    }
+                    Text(
+                        text = "项目：${displayProject.ifBlank { "—" }}",
+                        color = if (hasSelection) AgColors.Amber else u.sub,
+                        fontSize = if (hasSelection) 11.sp else 10.sp,
+                        fontWeight = if (hasSelection) FontWeight.Bold else FontWeight.Normal,
+                        maxLines = 1, overflow = TextOverflow.Ellipsis,
+                    )
+                }
             }
         }
         Spacer(Modifier.height(6.dp))
         Text(
-            if (status.message.isBlank()) "（空闲，等待指令）" else status.message,
-            color = u.fg, fontSize = 12.sp, lineHeight = 16.sp, maxLines = 2, overflow = TextOverflow.Ellipsis,
+            when {
+                hasSelection && working == null -> "（该项目暂无运行任务）"
+                else -> displayTitle.takeIf { it.isNotBlank() } ?: "（空闲，等待指令）"
+            },
+            color = if (hasSelection && working == null) u.sub else u.fg,
+            fontSize = 12.sp, lineHeight = 16.sp, maxLines = 2, overflow = TextOverflow.Ellipsis,
         )
-        Spacer(Modifier.height(4.dp))
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Text("项目", color = u.sub, fontSize = 10.sp)
-            Spacer(Modifier.width(5.dp))
-            Text(status.project.ifBlank { "—" }, color = u.fg, fontSize = 10.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        // Token 摘要行
+        working?.tokenUsage?.let { usage ->
+            Spacer(Modifier.height(4.dp))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text("Tokens", color = u.sub, fontSize = 10.sp)
+                Spacer(Modifier.width(5.dp))
+                Text(
+                    formatTokensCompact(usage.total),
+                    color = AgColors.Amber, fontSize = 11.sp, fontWeight = FontWeight.Bold,
+                )
+                Spacer(Modifier.weight(1f))
+                Text("点击卡片选项目 / 看明细 →", color = AgColors.Cyan, fontSize = 9.sp)
+            }
         }
     }
+
+    if (showPicker) {
+        ProjectPickerDialog(
+            allProjects = allProjects,
+            selectedProject = selectedProject,
+            hasTasks = tasks.isNotEmpty(),
+            onPick = { p ->
+                onSelectProject(p)
+                showPicker = false
+                // 选择了具体项目 → 顺便立即打开该项目的 Token 明细（自动模式不自动开）
+                if (p != null) showTokenDialog = true
+            },
+            onViewTokens = { showPicker = false; showTokenDialog = true },
+            onClear = { onSelectProject(null) },
+            onDismiss = { showPicker = false },
+        )
+    }
+
+    if (showTokenDialog) {
+        TokenDetailDialog(
+            task = working,
+            fallbackProject = displayProject,
+            fallbackStatus = status,
+            onDismiss = { showTokenDialog = false },
+        )
+    }
+}
+
+/** 项目选择器对话框（分组列表 + 当前选中高亮 + 明细入口 + 清空） */
+@Composable
+private fun ProjectPickerDialog(
+    allProjects: List<String>,
+    selectedProject: String?,
+    hasTasks: Boolean,
+    onPick: (String?) -> Unit,
+    onViewTokens: () -> Unit,
+    onClear: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    val u = ui()
+    AlertDialog(
+        containerColor = u.panel,
+        titleContentColor = u.fg,
+        textContentColor = u.fg,
+        onDismissRequest = onDismiss,
+        title = {
+            Text("选择要查看的项目", fontFamily = PixelFont, fontWeight = FontWeight.Bold)
+        },
+        text = {
+            Column(Modifier.fillMaxWidth()) {
+                // 自动项
+                Text(
+                    "（自动模式 = 全量 tasks 中最活跃的任务）",
+                    color = u.sub, fontSize = 10.sp,
+                )
+                Spacer(Modifier.height(6.dp))
+                ProjectPickerRow(
+                    name = "自动（最活跃）",
+                    hint = "关注热度最高的任务",
+                    selected = selectedProject == null,
+                    onClick = { onPick(null) },
+                )
+                Spacer(Modifier.height(8.dp))
+                // 项目列表
+                if (allProjects.isEmpty() || !hasTasks) {
+                    Text(
+                        "（当前还没有可选择的项目，Hook 未启动或暂无任务）",
+                        color = u.sub, fontSize = 11.sp,
+                    )
+                } else {
+                    Text(
+                        "我的项目（共 ${allProjects.size} 个）",
+                        color = u.fg, fontSize = 11.sp, fontWeight = FontWeight.SemiBold,
+                    )
+                    Spacer(Modifier.height(4.dp))
+                    Column(Modifier.verticalScroll(rememberScrollState()).heightIn(max = 220.dp)) {
+                        allProjects.forEach { name ->
+                            ProjectPickerRow(
+                                name = name,
+                                hint = "点击查看该项目的当前状态",
+                                selected = name == selectedProject,
+                                onClick = { onPick(name) },
+                            )
+                            Spacer(Modifier.height(3.dp))
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            Row {
+                if (selectedProject != null) {
+                    TextButton(onClick = {
+                        onClear()
+                    }) {
+                        Text("清空选择", color = u.sub, fontSize = 12.sp)
+                    }
+                }
+                TextButton(onClick = onViewTokens) {
+                    Text("查看 Tokens 明细", color = AgColors.Cyan, fontSize = 12.sp)
+                }
+                TextButton(onClick = onDismiss) {
+                    Text("完成", color = AgColors.Amber, fontSize = 12.sp)
+                }
+            }
+        },
+    )
+}
+
+@Composable
+private fun ProjectPickerRow(
+    name: String,
+    hint: String,
+    selected: Boolean,
+    onClick: () -> Unit,
+) {
+    val u = ui()
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(
+                if (selected) AgColors.Amber.copy(alpha = 0.16f) else u.panel2,
+            )
+            .border(1.dp, if (selected) AgColors.Amber else u.border)
+            .clickable { onClick() }
+            .padding(horizontal = 10.dp, vertical = 8.dp),
+    ) {
+        Box(
+            Modifier
+                .size(16.dp)
+                .clip(CircleShape)
+                .border(1.2.dp, if (selected) AgColors.Amber else u.sub, CircleShape)
+                .then(
+                    if (selected) Modifier.background(AgColors.Amber.copy(alpha = 0.4f), CircleShape) else Modifier
+                ),
+            contentAlignment = Alignment.Center,
+        ) {
+            if (selected) {
+                Box(Modifier.size(8.dp).clip(CircleShape).background(AgColors.Amber, CircleShape))
+            }
+        }
+        Spacer(Modifier.width(10.dp))
+        Column(Modifier.weight(1f)) {
+            Text(
+                name,
+                color = if (selected) AgColors.Amber else u.fg,
+                fontSize = 12.sp,
+                fontWeight = if (selected) FontWeight.Bold else FontWeight.SemiBold,
+                maxLines = 1, overflow = TextOverflow.Ellipsis,
+            )
+            Text(hint, color = u.sub, fontSize = 9.sp)
+        }
+    }
+}
+
+/** Harness 名称映射（首字母徽标 → 用户可读名） */
+private fun harnessDisplayName(source: String): String = when (source.lowercase()) {
+    "claude", "claudecode", "claude_code", "cc" -> "Claude Code"
+    "codex", "openai_codex", "cli" -> "Codex CLI"
+    "trae" -> "Trae"
+    "deepseek" -> "DeepSeek"
+    "solo", "soloagent" -> "Solo Agent"
+    else -> source.ifBlank { "Agent" }
+}
+
+/** 数字紧凑化：1234 → 1.2k / 1,234,567 → 1.2M */
+private fun formatTokensCompact(value: Int): String = when {
+    value <= 0 -> "0"
+    value < 1000 -> value.toString()
+    value < 1_000_000 -> String.format("%.1fk", value / 1000.0)
+    else -> String.format("%.1fM", value / 1_000_000.0)
+}
+private fun formatTokensCompact(value: Long): String = when {
+    value <= 0 -> "0"
+    value < 1000 -> value.toString()
+    value < 1_000_000 -> String.format("%.1fk", value / 1000.0)
+    else -> String.format("%.1fM", value / 1_000_000.0)
+}
+
+/** Token 用量明细对话框：当前任务 input / cached / output / reasoning / total + 子代理汇总 */
+@Composable
+private fun TokenDetailDialog(
+    task: NetTaskSnapshot?,
+    fallbackProject: String?,
+    fallbackStatus: AgentStatus,
+    onDismiss: () -> Unit,
+) {
+    val u = ui()
+
+    @Composable
+    fun UsageRow(label: String, value: String, accent: Color = u.fg) {
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            Text(label, color = u.sub, fontSize = 11.sp, modifier = Modifier.width(110.dp))
+            Spacer(Modifier.weight(1f))
+            Text(value, color = accent, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+        }
+    }
+
+    AlertDialog(
+        containerColor = u.panel,
+        titleContentColor = u.fg,
+        textContentColor = u.fg,
+        onDismissRequest = onDismiss,
+        title = {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text("Token 用量明细", fontFamily = PixelFont, fontWeight = FontWeight.Bold)
+            }
+        },
+        text = {
+            val t = task
+            Column(Modifier.fillMaxWidth()) {
+                if (t == null) {
+                    if (!fallbackProject.isNullOrBlank()) {
+                        Text(
+                            "项目：$fallbackProject",
+                            color = AgColors.Amber, fontSize = 12.sp, fontWeight = FontWeight.Bold,
+                            maxLines = 1, overflow = TextOverflow.Ellipsis,
+                        )
+                        Spacer(Modifier.height(4.dp))
+                    }
+                    Text(
+                        text = buildString {
+                            if (t == null && !fallbackProject.isNullOrBlank()) append("（该项目当前无任务运行，暂无 Token 数据）")
+                            else if (fallbackStatus.message.isBlank()) append("（当前无工作中的 Agent 任务）")
+                            else append(fallbackStatus.message)
+                        },
+                        color = u.sub, fontSize = 12.sp,
+                    )
+                } else {
+                    // Task 头
+                    Text(
+                        "任务：${t.title.ifBlank { t.userPrompt ?: "(无标题)" }}",
+                        color = u.fg, fontSize = 12.sp, fontWeight = FontWeight.SemiBold,
+                        maxLines = 2, overflow = TextOverflow.Ellipsis,
+                    )
+                    Spacer(Modifier.height(3.dp))
+                    Text(
+                        "项目：${t.projectName.ifBlank { "—" }}",
+                        color = u.sub, fontSize = 10.sp, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                    )
+                    Spacer(Modifier.height(10.dp))
+                    // 用量条
+                    val usage = t.tokenUsage
+                    if (usage == null) {
+                        Text("（尚未上报 token 用量）", color = u.sub, fontSize = 11.sp)
+                    } else {
+                        UsageRow("输入 (Input)", formatTokensCompact(usage.input), AgColors.Blue)
+                        Spacer(Modifier.height(4.dp))
+                        UsageRow("缓存 (Cached)", formatTokensCompact(usage.cachedInput), AgColors.Violet)
+                        Spacer(Modifier.height(4.dp))
+                        UsageRow("输出 (Output)", formatTokensCompact(usage.output), AgColors.Cyan)
+                        Spacer(Modifier.height(4.dp))
+                        UsageRow("推理 (Reasoning)", formatTokensCompact(usage.reasoningOutput), AgColors.Amber)
+                        Spacer(Modifier.height(6.dp))
+                        Spacer(Modifier.height(6.dp))
+                        Box(Modifier.fillMaxWidth().height(1.dp).background(u.border))
+                        Spacer(Modifier.height(6.dp))
+                        UsageRow("总计 (Total)", formatTokensCompact(usage.total), AgColors.Green)
+                    }
+                    // 子代理
+                    if (t.subagents.isNotEmpty()) {
+                        Spacer(Modifier.height(12.dp))
+                        Spacer(Modifier.height(6.dp))
+                        Box(Modifier.fillMaxWidth().height(1.dp).background(u.border))
+                        Spacer(Modifier.height(6.dp))
+                        Text(
+                            "子代理（共 ${t.subagents.size} 个）",
+                            color = u.fg, fontSize = 11.sp, fontWeight = FontWeight.SemiBold,
+                        )
+                        Spacer(Modifier.height(4.dp))
+                        t.subagents.forEach { s ->
+                            Spacer(Modifier.height(4.dp))
+                            Column(
+                                Modifier
+                                    .fillMaxWidth()
+                                    .background(u.panel2)
+                                    .padding(6.dp)
+                            ) {
+                                Text(
+                                    s.displayName.ifBlank { s.path },
+                                    color = u.fg, fontSize = 11.sp, fontWeight = FontWeight.SemiBold,
+                                    maxLines = 1, overflow = TextOverflow.Ellipsis,
+                                )
+                                Spacer(Modifier.height(2.dp))
+                                val st = s.lifecycle
+                                UsageRow(
+                                    "状态 · ${stateCnOf(st)}",
+                                    formatTokensCompact(s.tokenUsage?.total ?: 0),
+                                    stateColorOf(st),
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) {
+                Text("关闭", color = AgColors.Amber, fontSize = 12.sp)
+            }
+        },
+    )
 }
 
 // ================= 语音栏（点按切换：点一下启动，再点一下结束） =================
