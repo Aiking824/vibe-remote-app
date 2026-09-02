@@ -56,6 +56,7 @@ import androidx.compose.material.icons.filled.Keyboard
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.Lock
+import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.Mouse
 import androidx.compose.material.icons.filled.QrCodeScanner
 import androidx.compose.material.icons.filled.Refresh
@@ -108,6 +109,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.viberemote.mobile.R
@@ -280,6 +282,7 @@ fun RemoteScreen(
     var page by remember { mutableStateOf(Page.PAD) }
     val landscape = LocalConfiguration.current.orientation == Configuration.ORIENTATION_LANDSCAPE
     val agentLandscape = page == Page.AGENT && landscape
+    val hotLandscape = page == Page.HOT && landscape
 
     // 首界面 Agent 状态卡的"选中项目"（跨 PAD/MOUSE/HOT 共享同一个选择）
     //   null = 自动（展示全量 tasks 里最活跃的那条任务）
@@ -289,8 +292,8 @@ fun RemoteScreen(
     Scaffold(
         containerColor = u.bg,
         bottomBar = {
-            // Agent 页横屏：只保留主界面，隐藏底部导航
-            if (paired && !agentLandscape) {
+            // 快捷键页面横屏时隐藏底栏，竖屏常驻
+            if (paired && !agentLandscape && !hotLandscape) {
                 NavigationBar(containerColor = u.panel, tonalElevation = 0.dp) {
                     NavigationBarItem(
                         selected = page == Page.PAD,
@@ -352,10 +355,10 @@ fun RemoteScreen(
             Column(
                 Modifier
                     .fillMaxSize()
-                    .padding(horizontal = if (agentLandscape) 0.dp else 12.dp, vertical = if (agentLandscape) 0.dp else 8.dp),
+                    .padding(horizontal = if (agentLandscape || hotLandscape) 0.dp else 12.dp, vertical = if (agentLandscape || hotLandscape) 0.dp else 8.dp),
             ) {
-                // Agent 横屏：隐藏顶部标题/设备/连接状态，仅保留主内容
-                if (!agentLandscape) {
+                // 快捷键页面横屏时隐藏顶栏，竖屏常驻
+                if (!agentLandscape && !(paired && hotLandscape)) {
                     // —— 顶栏 · 第 1 行：标题 + 设备入口 ——
                     var showDeviceDialog by remember { mutableStateOf(false) }
                     Row(verticalAlignment = Alignment.CenterVertically) {
@@ -987,24 +990,61 @@ private fun HotPage(
         Modifier.fillMaxSize(),
         verticalArrangement = Arrangement.spacedBy(10.dp),
     ) {
-        StatusCard(status, tasks, selectedProject, onSelectProject, Modifier.fillMaxWidth())
-        Text(
-            "电脑端常用快捷键（直接在电脑端执行）",
-            color = u.fg, fontSize = 13.sp, fontWeight = FontWeight.SemiBold,
-        )
-        Section("剪贴板", clip)
-        Section("系统", hot)
-        Spacer(Modifier.height(4.dp))
-        Text(
-            "提示：复制/剪切/粘贴作用于电脑端当前焦点应用。" +
-                "Win+L 会立刻锁屏；Alt+Tab 切到下一个窗口。",
-            color = u.sub, fontSize = 11.5.sp, lineHeight = 16.sp,
-        )
+        if (landscape) {
+            // 横屏：6 个按键平铺两行三列，铺满整屏且按键竖直居中
+            Row(
+                Modifier.fillMaxWidth().weight(1f),
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                clip.forEach { def ->
+                    ClipButton(
+                        def, { client.keyTap(def.id) }, Modifier.weight(1f).fillMaxHeight(),
+                        iconSize = 20.dp, labelSize = 11.sp, mappingSize = 8.sp, vPadding = 6.dp,
+                    )
+                }
+            }
+            Row(
+                Modifier.fillMaxWidth().weight(1f),
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                hot.forEach { def ->
+                    ClipButton(
+                        def, { client.keyTap(def.id) }, Modifier.weight(1f).fillMaxHeight(),
+                        iconSize = 20.dp, labelSize = 11.sp, mappingSize = 8.sp, vPadding = 6.dp,
+                    )
+                }
+            }
+        } else {
+            // 竖屏：完整布局
+            StatusCard(status, tasks, selectedProject, onSelectProject, Modifier.fillMaxWidth())
+            Text(
+                "电脑端常用快捷键（直接在电脑端执行）",
+                color = u.fg, fontSize = 13.sp, fontWeight = FontWeight.SemiBold,
+            )
+            Section("剪贴板", clip)
+            Section("系统", hot)
+            Spacer(Modifier.height(4.dp))
+            Text(
+                "提示：复制/剪切/粘贴作用于电脑端当前焦点应用。" +
+                    "Win+L 会立刻锁屏；Alt+Tab 切到下一个窗口。",
+                color = u.sub, fontSize = 11.5.sp, lineHeight = 16.sp,
+            )
+        }
     }
 }
 
 @Composable
-private fun ClipButton(def: KeyDef, onTap: () -> Unit, modifier: Modifier) {
+private fun ClipButton(
+    def: KeyDef,
+    onTap: () -> Unit,
+    modifier: Modifier,
+    iconSize: Dp = 26.dp,
+    labelSize: TextUnit = 13.sp,
+    mappingSize: TextUnit = 9.sp,
+    vPadding: Dp = 14.dp,
+) {
     val u = ui()
     var pressed by remember { mutableStateOf(false) }
     Box(
@@ -1016,14 +1056,14 @@ private fun ClipButton(def: KeyDef, onTap: () -> Unit, modifier: Modifier) {
                     awaitFirstDown(); pressed = true; onTap(); waitForUpOrCancellation(); pressed = false
                 }
             }
-            .padding(vertical = 14.dp),
+            .padding(vertical = vPadding),
         contentAlignment = Alignment.Center,
     ) {
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
-            Icon(keyIcon(def) ?: Icons.Filled.ContentPaste, contentDescription = def.label, tint = AgColors.Amber, modifier = Modifier.size(26.dp))
-            Spacer(Modifier.height(4.dp))
-            Text(def.label, color = u.fg, fontSize = 13.sp, fontWeight = FontWeight.Bold)
-            Text(mappingText(def), color = u.sub, fontSize = 9.sp)
+            Icon(keyIcon(def) ?: Icons.Filled.ContentPaste, contentDescription = def.label, tint = AgColors.Amber, modifier = Modifier.size(iconSize))
+            Spacer(Modifier.height(3.dp))
+            Text(def.label, color = u.fg, fontSize = labelSize, fontWeight = FontWeight.Bold)
+            Text(mappingText(def), color = u.sub, fontSize = mappingSize)
         }
     }
 }
@@ -2254,7 +2294,7 @@ private fun TokenDetailDialog(
     )
 }
 
-// ================= 语音栏（点按切换：点一下启动，再点一下结束） =================
+// ================= 语音栏（麦克风图标，点击触发 keymap "voice" 条目） =================
 @Composable
 fun VoiceBar(
     client: RemoteClient,
@@ -2264,9 +2304,6 @@ fun VoiceBar(
     modifier: Modifier = Modifier,
 ) {
     val u = ui()
-    var pttActive by remember { mutableStateOf(false) }
-    var tip by remember { mutableStateOf("") }
-
     Box(
         modifier
             .background(u.panel)
@@ -2276,34 +2313,19 @@ fun VoiceBar(
             Modifier
                 .fillMaxWidth()
                 .height(54.dp)
-                .background(if (pttActive) AgColors.Amber.copy(alpha = 0.30f) else u.panel2)
-                .border(1.dp, if (pttActive) AgColors.Amber else u.border)
+                .background(u.panel2)
+                .border(1.dp, u.border)
                 .clickable {
-                    if (!pttActive) {
-                        // 点击启动：先请求麦克风权限，再发 hold_start + 开始录音
-                        onNeedsMic()
-                        pttActive = true
-                        client.holdStart()
-                        MicHolder.start(client)
-                    } else {
-                        // 再次点击：停止录音 + 发 hold_end
-                        MicHolder.stop()
-                        client.holdEnd()
-                        pttActive = false
-                    }
+                    client.keyTap("voice")
                 },
             contentAlignment = Alignment.Center,
         ) {
-            Text(
-                text = if (pttActive) "点击结束" else "点击说话",
-                color = if (pttActive) Color.White else u.fg,
-                fontSize = 16.sp,
-                fontWeight = FontWeight.SemiBold,
+            Icon(
+                imageVector = Icons.Filled.Mic,
+                contentDescription = "语音",
+                tint = u.fg,
+                modifier = Modifier.size(28.dp),
             )
-        }
-        if (tip.isNotBlank()) {
-            Spacer(Modifier.height(4.dp))
-            Text(tip, color = AgColors.Amber, fontSize = 10.sp)
         }
     }
 }

@@ -41,12 +41,13 @@ KEYEVENTF_UNICODE = 0x0004
 KEYEVENTF_KEYUP = 0x0002
 
 class _INPUT_KEYBDINPUT(ctypes.Structure):
+    """KEYBDINPUT 结构体（对齐 Windows 64 位 ULONG_PTR=8 字节）。"""
     _fields_ = [
         ("wVk", ctypes.c_ushort),
         ("wScan", ctypes.c_ushort),
-        ("dwFlags", ctypes.c_ulong),
-        ("time", ctypes.c_ulong),
-        ("dwExtraInfo", ctypes.POINTER(ctypes.c_ulong)),
+        ("dwFlags", ctypes.c_ulong),      # DWORD = 4 bytes
+        ("time", ctypes.c_ulong),         # DWORD = 4 bytes
+        ("dwExtraInfo", ctypes.c_void_p),  # ULONG_PTR = 8 bytes on 64-bit
     ]
 
 class _INPUT_UNION(ctypes.Union):
@@ -67,6 +68,12 @@ VK = {
     "ctrl": 0x11,
     "alt": 0x12,
     "shift": 0x10,
+    "lctrl": 0xA2,
+    "lalt": 0xA4,
+    "lshift": 0xA0,
+    "rctrl": 0xA3,
+    "ralt": 0xA5,
+    "rshift": 0xA1,
     "backspace": 0x08,
     "space": 0x20,
     "escape": 0x1B,
@@ -97,6 +104,75 @@ def _down(vk: int) -> None:
 
 def _up(vk: int) -> None:
     ctypes.windll.user32.keybd_event(vk, 0, KEYEVENTF_KEYUP, 0)
+
+
+def _send_key_sendinput(vk: int, up: bool = False) -> None:
+    """用 SendInput 发送单个按键事件（比 keybd_event 对 Win 键组合更可靠）。"""
+    inp = _INPUT()
+    inp.type = INPUT_KEYBOARD
+    ki = inp.union.ki
+    ki.wVk = vk
+    ki.wScan = 0
+    ki.dwFlags = KEYEVENTF_KEYUP if up else 0
+    ki.time = 0
+    ki.dwExtraInfo = 0  # c_void_p，直接用整数 0
+    ctypes.windll.user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(_INPUT))
+
+
+def send_ctrl_shift_win(hold_ms: int = 220) -> bool:
+    """发送 Ctrl+Shift+Win 组合键（已废弃，保留向后兼容）。
+
+    新语音输入请改用 send_lshift_lctrl_lalt()。
+    """
+    try:
+        user32 = ctypes.windll.user32
+        user32.keybd_event(0xA2, 0, 0, 0)
+        time.sleep(0.08)
+        user32.keybd_event(0xA0, 0, 0, 0)
+        time.sleep(0.08)
+        user32.keybd_event(0x5B, 0, 0, 0)
+        time.sleep(hold_ms / 1000.0)
+        user32.keybd_event(0x5B, 0, KEYEVENTF_KEYUP, 0)
+        time.sleep(0.04)
+        user32.keybd_event(0xA0, 0, KEYEVENTF_KEYUP, 0)
+        time.sleep(0.04)
+        user32.keybd_event(0xA2, 0, KEYEVENTF_KEYUP, 0)
+        return True
+    except Exception:
+        return False
+
+
+def send_lshift_lctrl_lalt(hold_ms: int = 120) -> bool:
+    """发送 左Shift+左Ctrl+左Alt 组合键（语音输入触发/结束）。
+
+    对应 keymap.json 中 id="voice" 条目。
+    VK_LSHIFT=0xA0, VK_LCONTROL=0xA2, VK_LMENU=0xA4（左Alt）。
+
+    顺序：LShift → LCtrl → LAlt（保持 hold_ms）→ 释放 LAlt → LCtrl → LShift。
+    Alt 键不被系统策略拦截，比 Win 键组合更可靠。
+    """
+    try:
+        user32 = ctypes.windll.user32
+        # 1. 左Shift 按下，保持 40ms
+        user32.keybd_event(0xA0, 0, 0, 0)
+        time.sleep(0.04)
+        # 2. 左Ctrl 按下，保持 40ms
+        user32.keybd_event(0xA2, 0, 0, 0)
+        time.sleep(0.04)
+        # 3. 左Alt 按下，保持 hold_ms 让系统识别组合键
+        user32.keybd_event(0xA4, 0, 0, 0)
+        time.sleep(hold_ms / 1000.0)
+        # 4. 释放左Alt
+        user32.keybd_event(0xA4, 0, KEYEVENTF_KEYUP, 0)
+        time.sleep(0.03)
+        # 5. 释放左Ctrl
+        user32.keybd_event(0xA2, 0, KEYEVENTF_KEYUP, 0)
+        time.sleep(0.03)
+        # 6. 释放左Shift
+        user32.keybd_event(0xA0, 0, KEYEVENTF_KEYUP, 0)
+        return True
+    except Exception:
+        return False
 
 
 class KeyInjector:

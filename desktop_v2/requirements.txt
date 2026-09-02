@@ -1,0 +1,9 @@
+# Vibe Remote desktop_v2 桌面端依赖
+# 与 desktop/requirements.txt 兼容，新增 PySide6
+PySide6==6.11.1
+websockets==12.0
+numpy
+sounddevice
+winsdk
+qrcode
+Pillow

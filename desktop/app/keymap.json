@@ -195,6 +195,18 @@
       "group": "num",
       "type": "key",
       "mapping": "4"
+    },
+    {
+      "id": "voice",
+      "label": "语音",
+      "display": "LShift+LCtrl+LAlt",
+      "group": "voice",
+      "type": "combo",
+      "mapping": [
+        "lshift",
+        "lctrl",
+        "lalt"
+      ]
     }
   ]
 }

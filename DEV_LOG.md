@@ -11,7 +11,8 @@
 | ---------- | --------- | ----------------------------------------------------------------------------------------- |
 | `main`     | `6a4b07d` | 旧版本：GUI 桌面窗口 + 系统托盘 + 基础 Agent 页（手绘 UI）                                                   |
 | `v2.0`     | `5490feb` | AgentPager 全量移植（任务列表 / 详情 / 用量仪表盘 / 设置 / 8-bit 音效 / 像素核心渲染 / 任务删除 / Hook 聚合）              |
-| **`v2.1`** | 当前        | **Hook 四 Bug 修复** + **Trae/DeepSeek 移除**（仅保留 Claude Code / Codex 两家）+ **get\_tasks 首屏拉取** |
+| **`v2.1`** | 之前        | **Hook 四 Bug 修复** + **Trae/DeepSeek 移除**（仅保留 Claude Code / Codex 两家）+ **get\_tasks 首屏拉取** |
+| **`v2.2`** | 当前        | **desktop_v2 模块**（PySide6 桌面程序替代 Web 控制）+ **steve 图标**（手机/电脑统一）+ **Keymap 在线编辑** + **标签切换淡入动画** |
 
 *当前工作目录*：`d:\AIData\traedata\vibe-remote`
 
@@ -83,6 +84,10 @@ vibe-remote/
     ├─ vibe-remote.spec           # PyInstaller：vibe-remote.exe（GUI 版，无黑窗）
     ├─ vibe-remote-gui.spec       # 同上（别名）
     └─ vibe_agent_hook.spec       # PyInstaller：vibe_agent_hook.exe（CLI，必须 dist 根目录）
+
+└─ desktop_v2/                    # *v2.2 新增：PySide6 桌面程序（替代 pywebview Web 控制）*
+    ├─ main.py / main_window.py / runtime.py / theme.py / launch_v2.bat
+    └─ assets/app.ico             # steve 图标（详见 §11.5）
 ```
 
 ***
@@ -522,6 +527,108 @@ git merge v2.0
 - [android/app/src/main/java/com/viberemote/mobile/SoundEngine.kt](file:///d:/AIData/traedata/vibe-remote/android/app/src/main/java/com/viberemote/mobile/SoundEngine.kt) — 8-bit 音效播放
 
 - [android/app/src/main/java/com/viberemote/mobile/ArcadeSounds.kt](file:///d:/AIData/traedata/vibe-remote/android/app/src/main/java/com/viberemote/mobile/ArcadeSounds.kt) — 8-bit 音符合成 + TaskSoundTracker
+
+***
+
+## 11.5 desktop_v2 模块（v2.2 新增：PySide6 桌面程序替代 Web 控制）
+
+### 11.5.1 为什么有这个模块
+
+v2.1 之前桌面端是 `pywebview` 包裹的 Web 控制台（`desktop/app/main.py` 提供 HTTP + WS 服务）。
+v2.2 用 PySide6 重写为原生桌面程序 `desktop_v2/`，对齐 AgentPager Windows WPF 风格：
+
+- **无浏览器依赖**：关闭 `pywebview`，纯 Qt 控件
+- **无控制台黑窗**：`launch_v2.bat` 用 `pythonw.exe` 启动
+- **系统托盘退出即停止服务**：关闭主窗口进托盘，托盘"退出"调用 `runtime.stop()` + `app.quit()`
+- **单例运行**：`QLocalServer` 监听 `vibe-remote-v2.singleton`，二次启动唤起前台
+- **steve 图标统一**：电脑端 `assets/app.ico`，手机端 `mipmap-*/ic_launcher.png`（5 密度）
+
+### 11.5.2 目录结构
+
+```
+vibe-remote/desktop_v2/
+├─ main.py              # 入口：单例 + QApplication + 主窗口 + 托盘 + runtime
+├─ main_window.py       # MainWindow + 4 页面（Pairing/Keymap/CodexHook/ClaudeHook）
+├─ runtime.py           # RuntimeService（QThread + QTimer 1500ms 轮询）
+├─ theme.py             # AgentPager 调色板 + QSS（primary/danger 按钮样式）
+├─ launch_v2.bat        # pythonw.exe 启动脚本
+├─ requirements.txt     # PySide6 + qrcode
+└─ assets/app.ico       # steve-minecraft-vector-1.ico 拷贝
+```
+
+### 11.5.3 核心文件引用
+
+- [desktop_v2/main.py](file:///d:/AIData/traedata/vibe-remote/desktop_v2/main.py) — 入口：单例 + QApplication + MainWindow + 系统托盘 + runtime 启动
+- [desktop_v2/main_window.py](file:///d:/AIData/traedata/vibe-remote/desktop_v2/main_window.py) — MainWindow + PairingPage + KeymapPage（可编辑）+ CodexHookPage + ClaudeHookPage
+- [desktop_v2/runtime.py](file:///d:/AIData/traedata/vibe-remote/desktop_v2/runtime.py) — RuntimeService：复用 desktop/app/main.py 的 VibeRemoteServer，子线程跑 asyncio.run
+- [desktop_v2/theme.py](file:///d:/AIData/traedata/vibe-remote/desktop_v2/theme.py) — AgentPager 调色板 + QSS 样式
+- [desktop_v2/launch_v2.bat](file:///d:/AIData/traedata/vibe-remote/desktop_v2/launch_v2.bat) — pythonw.exe 无控制台启动脚本
+
+### 11.5.4 数据流（关键信号连接）
+
+```
+RuntimeService（QThread）
+    ↓ service_status_changed(str)      → MainWindow.set_service_status
+    ↓ phone_count_changed(int)         → MainWindow.set_phone_count
+    ↓ pairing_text_changed(str)        → PairingPage.set_pairing_text
+    ↓ qr_pixmap_changed(QPixmap)       → PairingPage.set_qr_pixmap
+    ↓ networks_changed(list, str)      → PairingPage.set_networks
+    ↓ keymap_changed(list[dict])       → KeymapPage.set_keymap
+    ↓ codex_hook_status_changed(str)   → CodexHookPage.set_status
+    ↓ claude_hook_status_changed(str)  → ClaudeHookPage.set_status
+    ↓ hook_event_arrived(src, ev, sum) → MainWindow.set_last_event_badge
+
+UI → Runtime：
+    PairingPage.refresh_requested     → runtime.refresh_networks
+    PairingPage.copy_pairing_requested→ runtime.copy_pairing_text
+    CodexHookPage.install_requested   → runtime.install_hook("codex")
+    ClaudeHookPage.install_requested  → runtime.install_hook("claude")
+    KeymapPage.push_requested         → runtime.push_keymap
+    KeymapPage.save_requested(list)   → runtime.save_keymap     # v2.2 新增
+    KeymapPage.add_requested(dict)    → runtime.add_key_to_store    # v2.2 新增
+    KeymapPage.remove_requested(str)  → runtime.remove_key_from_store # v2.2 新增
+    KeymapPage.reset_requested        → runtime.reset_keymap_store    # v2.2 新增
+```
+
+### 11.5.5 Keymap 编辑页（v2.2 新增）
+
+`KeymapPage` 6 列表格（ID/标签/显示/分组/类型/映射），双击可编辑：
+
+- **新增行**：弹 `QDialog` 表单填字段，combo 类型选 `key/combo/action`
+- **删除行**：选中行后"－ 删除"按钮
+- **恢复默认**：二次确认后调用 `KeymapStore.reset()`
+- **保存到 keymap.json**：收集表格 → `runtime.save_keymap(keys)` → `KeymapStore.save(data)`
+- **推送到手机**：`runtime.push_keymap()` → `loop.call_soon_threadsafe(server._broadcast_keymap)`
+- **未保存提示**：编辑后右上角显示橙色"● 未保存的修改"
+
+combo 类型映射在 UI 用 `+` 分隔（如 `ctrl+c`），runtime 端解析为 `["ctrl","c"]`。
+
+### 11.5.6 标签切换淡入动画（v2.2 新增）
+
+`MainWindow._on_tab_changed(idx)`：
+- 给 4 个 tab 页面各挂 `QGraphicsOpacityEffect`
+- `primary_tabs.currentChanged` 触发 `QPropertyAnimation(opacity, 0→1, 180ms, OutCubic)`
+- 快速切换时 `anim.stop()` 取消上一个动画
+
+### 11.5.7 联调测试结果（2026-09-02）
+
+| 项 | 结果 |
+|---|---|
+| 程序启动 | ✅ WebSocket 8765 + Hook TCP 49361 监听正常 |
+| ADB reverse | ✅ USB 直连地址 127.0.0.1:8765 自动配置 |
+| WebSocket /ws 握手 | ✅ 收到初始 `snapshot` 消息 |
+| Hook TCP 接收 | ✅ 发送 hook 事件后客户端收到 `keymap` 广播 |
+| Android steve 图标 | ✅ 5 密度 PNG 已打包进 APK（3KB~28KB） |
+| APK 编译 | ✅ 13 秒构建成功（18.78 MB） |
+
+### 11.5.8 启动方式
+
+```batch
+cd d:\AIData\traedata\vibe-remote\desktop_v2
+launch_v2.bat            REM 推荐：pythonw.exe 无控制台
+D:\Python312\python.exe main.py            REM 调试：带控制台
+D:\Python312\python.exe main.py --background  REM 后台：不显示窗口
+```
 
 ***
 

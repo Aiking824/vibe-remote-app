@@ -677,8 +677,6 @@ class VibeRemoteServer:
                 self.broadcast(payload)   # 全量广播（含用量变化）
             else:
                 await self._send_json(websocket, payload)
-        elif kind == "voice_toggle":
-            return None
         elif kind == "input_restore":
             # 手动恢复：切回默认（提示用户手动选择，避免误切其他设备）
             self._push_rec("如需恢复默认麦克风，请在 设置→系统→声音 中手动选择输入设备")
